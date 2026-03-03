@@ -334,21 +334,6 @@ function App() {
   }, [isGlobalsOpen, globalHeaders, globalVariables]);
 
   useEffect(() => {
-    if (!folderDialog) {
-      setFolderNameDraft("");
-      return;
-    }
-
-    if (folderDialog.mode === "rename") {
-      const folder = folderById.get(folderDialog.folderId);
-      setFolderNameDraft(folder?.name ?? "");
-      return;
-    }
-
-    setFolderNameDraft("");
-  }, [folderDialog, folderById]);
-
-  useEffect(() => {
     if (!actionMessage) {
       return;
     }
@@ -516,10 +501,12 @@ function App() {
   };
 
   const openCreateFolderDialog = (parentFolderId?: string) => {
+    setFolderNameDraft("");
     setFolderDialog({ mode: "create", parentFolderId });
   };
 
   const openRenameFolderDialog = (folder: CollectionFolder) => {
+    setFolderNameDraft(folder.name);
     setFolderDialog({ mode: "rename", folderId: folder.id });
   };
 
