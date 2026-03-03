@@ -3,6 +3,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type DragEvent,
   type MouseEvent,
   type ReactElement,
 } from "react";
@@ -63,6 +64,16 @@ type FolderDialogState =
   | {
       mode: "rename";
       folderId: string;
+    };
+
+type DragItem =
+  | {
+      type: "request";
+      id: string;
+    }
+  | {
+      type: "folder";
+      id: string;
     };
 
 function bytesToReadable(size: number): string {
@@ -227,6 +238,7 @@ function App() {
   const deleteCollectionFolder = useAppStore((state) => state.deleteCollectionFolder);
   const duplicateCollectionFolder = useAppStore((state) => state.duplicateCollectionFolder);
   const toggleCollectionFolder = useAppStore((state) => state.toggleCollectionFolder);
+  const moveCollectionFolder = useAppStore((state) => state.moveCollectionFolder);
   const moveRequestToFolder = useAppStore((state) => state.moveRequestToFolder);
   const deleteRequest = useAppStore((state) => state.deleteRequest);
   const duplicateRequest = useAppStore((state) => state.duplicateRequest);
@@ -252,6 +264,8 @@ function App() {
   const [movingRequestId, setMovingRequestId] = useState<string | null>(null);
   const [movingFolderDraft, setMovingFolderDraft] = useState("__root");
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [dragItem, setDragItem] = useState<DragItem | null>(null);
+  const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
 
   useEffect(() => {
     void useAppStore.getState().load();
@@ -566,6 +580,142 @@ function App() {
     }
   };
 
+  const getFolderDescendantIds = (rootFolderId: string): Set<string> => {
+    const descendants = new Set<string>([rootFolderId]);
+    const queue = [rootFolderId];
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) {
+        continue;
+      }
+
+      folders.forEach((folder) => {
+        if (folder.parentFolderId === current && !descendants.has(folder.id)) {
+          descendants.add(folder.id);
+          queue.push(folder.id);
+        }
+      });
+    }
+
+    return descendants;
+  };
+
+  const canDropIntoFolder = (targetFolderId?: string): boolean => {
+    if (!dragItem) {
+      return false;
+    }
+
+    if (dragItem.type === "request") {
+      const request = requests.find((item) => item.id === dragItem.id);
+      if (!request) {
+        return false;
+      }
+
+      if ((request.folderId ?? undefined) === targetFolderId) {
+        return false;
+      }
+
+      if (!targetFolderId) {
+        return true;
+      }
+
+      const targetFolder = folderById.get(targetFolderId);
+      return Boolean(targetFolder && targetFolder.collectionId === request.collectionId);
+    }
+
+    const movingFolder = folderById.get(dragItem.id);
+    if (!movingFolder) {
+      return false;
+    }
+
+    if ((movingFolder.parentFolderId ?? undefined) === targetFolderId) {
+      return false;
+    }
+
+    if (!targetFolderId) {
+      return true;
+    }
+
+    const targetFolder = folderById.get(targetFolderId);
+    if (!targetFolder) {
+      return false;
+    }
+
+    if (targetFolder.collectionId !== movingFolder.collectionId) {
+      return false;
+    }
+
+    const descendants = getFolderDescendantIds(movingFolder.id);
+    return !descendants.has(targetFolderId);
+  };
+
+  const handleDragStart =
+    (item: DragItem) =>
+    (event: DragEvent<HTMLElement>): void => {
+      setDragItem(item);
+      setDragOverTarget(null);
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", `${item.type}:${item.id}`);
+    };
+
+  const handleDragEnd = (): void => {
+    setDragItem(null);
+    setDragOverTarget(null);
+  };
+
+  const handleDragOverTarget =
+    (targetFolderId?: string) =>
+    (event: DragEvent<HTMLElement>): void => {
+      event.stopPropagation();
+      if (!canDropIntoFolder(targetFolderId)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setDragOverTarget(targetFolderId ?? "__root");
+    };
+
+  const handleDragLeaveTarget =
+    (targetFolderId?: string) =>
+    (event: DragEvent<HTMLElement>): void => {
+      event.stopPropagation();
+      if (dragOverTarget === (targetFolderId ?? "__root")) {
+        setDragOverTarget(null);
+      }
+    };
+
+  const handleDropTarget =
+    (targetFolderId?: string) =>
+    (event: DragEvent<HTMLElement>): void => {
+      event.stopPropagation();
+      if (!canDropIntoFolder(targetFolderId) || !dragItem) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (dragItem.type === "request") {
+        moveRequestToFolder(dragItem.id, targetFolderId);
+        setActionMessage(
+          targetFolderId
+            ? `Request moved to ${folderById.get(targetFolderId)?.name ?? "folder"}`
+            : "Request moved to root",
+        );
+      } else {
+        moveCollectionFolder(dragItem.id, targetFolderId);
+        setActionMessage(
+          targetFolderId
+            ? `Folder moved to ${folderById.get(targetFolderId)?.name ?? "folder"}`
+            : "Folder moved to root",
+        );
+      }
+
+      setDragItem(null);
+      setDragOverTarget(null);
+    };
+
   const importCurl = () => {
     try {
       const parsed = parseCurlCommand(curlValue);
@@ -684,8 +834,22 @@ function App() {
       nodes.push(
         <li key={folder.id} className="tree-node">
           <div
-            className={selectedFolderId === folder.id ? "folder-row active" : "folder-row"}
+            className={
+              [
+                "folder-row",
+                selectedFolderId === folder.id ? "active" : "",
+                dragOverTarget === folder.id ? "drop-target" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")
+            }
             style={{ paddingLeft: `${10 + depth * 16}px` }}
+            draggable
+            onDragStart={handleDragStart({ type: "folder", id: folder.id })}
+            onDragEnd={handleDragEnd}
+            onDragOver={handleDragOverTarget(folder.id)}
+            onDragLeave={handleDragLeaveTarget(folder.id)}
+            onDrop={handleDropTarget(folder.id)}
           >
             <button
               type="button"
@@ -764,6 +928,9 @@ function App() {
               className="tree-request-main"
               style={{ paddingLeft: `${26 + depth * 16}px` }}
               onClick={() => selectRequest(request.id)}
+              draggable
+              onDragStart={handleDragStart({ type: "request", id: request.id })}
+              onDragEnd={handleDragEnd}
             >
               <span className={`method-badge ${getMethodColor(request.method)}`}>
                 {request.method}
@@ -908,7 +1075,14 @@ function App() {
               <p className="selected-folder-pill">Folder selected: root</p>
             )}
             {actionMessage ? <p className="selected-folder-pill">{actionMessage}</p> : null}
-            <ul className="tree-root">{renderCollectionTree(undefined, 0)}</ul>
+            <ul
+              className={dragOverTarget === "__root" ? "tree-root drop-target" : "tree-root"}
+              onDragOver={handleDragOverTarget(undefined)}
+              onDragLeave={handleDragLeaveTarget(undefined)}
+              onDrop={handleDropTarget(undefined)}
+            >
+              {renderCollectionTree(undefined, 0)}
+            </ul>
           </>
         ) : null}
 

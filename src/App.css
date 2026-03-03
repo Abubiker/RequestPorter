@@ -203,6 +203,12 @@ body {
 .tree-root {
   overflow: auto;
   padding-right: 2px;
+  border-radius: var(--radius-md);
+}
+
+.tree-root.drop-target {
+  border: 1px dashed rgba(117, 167, 255, 0.75);
+  background: rgba(61, 105, 195, 0.14);
 }
 
 .tree-node {
@@ -220,6 +226,7 @@ body {
   align-items: center;
   gap: 4px;
   min-height: 38px;
+  cursor: grab;
 }
 
 .folder-row:hover {
@@ -230,6 +237,11 @@ body {
 .folder-row.active {
   border-color: rgba(73, 219, 170, 0.7);
   background: linear-gradient(135deg, rgba(54, 188, 139, 0.24), rgba(64, 110, 201, 0.24));
+}
+
+.folder-row.drop-target {
+  border-color: rgba(117, 167, 255, 0.8);
+  background: linear-gradient(135deg, rgba(85, 154, 255, 0.28), rgba(73, 219, 170, 0.24));
 }
 
 .folder-toggle,
@@ -326,12 +338,16 @@ body {
   background: transparent;
   color: inherit;
   text-align: left;
-  cursor: pointer;
+  cursor: grab;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   width: 100%;
   min-height: 38px;
+}
+
+.tree-request-main:active {
+  cursor: grabbing;
 }
 
 .tree-request-actions {

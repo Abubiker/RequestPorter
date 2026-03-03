@@ -77,6 +77,7 @@ interface AppStoreState {
   deleteCollectionFolder: (folderId: string) => void;
   duplicateCollectionFolder: (folderId: string) => void;
   toggleCollectionFolder: (folderId: string) => void;
+  moveCollectionFolder: (folderId: string, parentFolderId?: string) => void;
   moveRequestToFolder: (requestId: string, folderId?: string) => void;
   deleteRequest: (requestId: string) => void;
   duplicateRequest: (requestId: string) => void;
@@ -633,6 +634,53 @@ export const useAppStore = create<AppStoreState>((set) => {
             : folder,
         ),
       }));
+    },
+
+    moveCollectionFolder: (folderId, parentFolderId) => {
+      updateSnapshot((snapshot) => {
+        const allFolders = snapshot.collectionFolders ?? [];
+        const movingFolder = allFolders.find((folder) => folder.id === folderId);
+        if (!movingFolder) {
+          return snapshot;
+        }
+
+        if (parentFolderId === folderId) {
+          return snapshot;
+        }
+
+        if (parentFolderId) {
+          const targetParent = allFolders.find((folder) => folder.id === parentFolderId);
+          if (!targetParent) {
+            return snapshot;
+          }
+
+          if (targetParent.collectionId !== movingFolder.collectionId) {
+            return snapshot;
+          }
+
+          const descendants = new Set(getDescendantFolderIds(allFolders, folderId));
+          if (descendants.has(parentFolderId)) {
+            return snapshot;
+          }
+        }
+
+        if ((movingFolder.parentFolderId ?? undefined) === parentFolderId) {
+          return snapshot;
+        }
+
+        return {
+          ...snapshot,
+          collectionFolders: allFolders.map((folder) =>
+            folder.id === folderId
+              ? {
+                  ...folder,
+                  parentFolderId,
+                  updatedAt: new Date().toISOString(),
+                }
+              : folder,
+          ),
+        };
+      });
     },
 
     moveRequestToFolder: (requestId, folderId) => {
