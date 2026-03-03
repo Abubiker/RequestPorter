@@ -73,7 +73,13 @@ interface AppStoreState {
   updateSelectedRequest: (payload: UpdateSelectedRequestPayload) => void;
   createRequest: (payload?: CreateRequestPayload) => void;
   createCollectionFolder: (payload: CreateFolderPayload) => void;
+  renameCollectionFolder: (folderId: string, name: string) => void;
+  deleteCollectionFolder: (folderId: string) => void;
+  duplicateCollectionFolder: (folderId: string) => void;
   toggleCollectionFolder: (folderId: string) => void;
+  moveRequestToFolder: (requestId: string, folderId?: string) => void;
+  deleteRequest: (requestId: string) => void;
+  duplicateRequest: (requestId: string) => void;
   updateWorkspaceGlobals: (payload: UpdateWorkspaceGlobalsPayload) => void;
   recordHistory: (payload: RecordHistoryPayload) => void;
 }
@@ -104,6 +110,27 @@ function getCollectionsByWorkspace(snapshot: AppSnapshot, workspaceId: string): 
 
 function getEnvironmentsByWorkspace(snapshot: AppSnapshot, workspaceId: string): Environment[] {
   return snapshot.environments.filter((environment) => environment.workspaceId === workspaceId);
+}
+
+function getDescendantFolderIds(folders: CollectionFolder[], folderId: string): string[] {
+  const descendants: string[] = [folderId];
+  const queue = [folderId];
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+
+    folders.forEach((folder) => {
+      if (folder.parentFolderId === current) {
+        descendants.push(folder.id);
+        queue.push(folder.id);
+      }
+    });
+  }
+
+  return descendants;
 }
 
 function ensureSelection(snapshot: AppSnapshot): AppSnapshot {
@@ -458,6 +485,142 @@ export const useAppStore = create<AppStoreState>((set) => {
       });
     },
 
+    renameCollectionFolder: (folderId, name) => {
+      const nextName = name.trim();
+      if (!nextName) {
+        return;
+      }
+
+      updateSnapshot((snapshot) => ({
+        ...snapshot,
+        collectionFolders: (snapshot.collectionFolders ?? []).map((folder) =>
+          folder.id === folderId
+            ? {
+                ...folder,
+                name: nextName,
+                updatedAt: new Date().toISOString(),
+              }
+            : folder,
+        ),
+      }));
+    },
+
+    deleteCollectionFolder: (folderId) => {
+      updateSnapshot((snapshot) => {
+        const allFolders = snapshot.collectionFolders ?? [];
+        const target = allFolders.find((folder) => folder.id === folderId);
+        if (!target) {
+          return snapshot;
+        }
+
+        const descendantIds = new Set(getDescendantFolderIds(allFolders, folderId));
+        const moveToFolderId = target.parentFolderId;
+
+        return {
+          ...snapshot,
+          collectionFolders: allFolders.filter((folder) => !descendantIds.has(folder.id)),
+          requests: snapshot.requests.map((request) =>
+            request.collectionId === target.collectionId &&
+            request.folderId &&
+            descendantIds.has(request.folderId)
+              ? {
+                  ...request,
+                  folderId: moveToFolderId,
+                  updatedAt: new Date().toISOString(),
+                }
+              : request,
+          ),
+        };
+      });
+    },
+
+    duplicateCollectionFolder: (folderId) => {
+      updateSnapshot((snapshot) => {
+        const allFolders = snapshot.collectionFolders ?? [];
+        const rootFolder = allFolders.find((folder) => folder.id === folderId);
+        if (!rootFolder) {
+          return snapshot;
+        }
+
+        const sourceIds = getDescendantFolderIds(allFolders, folderId);
+        const sourceSet = new Set(sourceIds);
+        const now = new Date().toISOString();
+        const idMap = new Map<string, string>();
+
+        const duplicatedFolders = sourceIds
+          .map((sourceId) => allFolders.find((folder) => folder.id === sourceId))
+          .filter((folder): folder is CollectionFolder => Boolean(folder))
+          .map((sourceFolder) => {
+            const newId = generateId("folder");
+            idMap.set(sourceFolder.id, newId);
+
+            return {
+              ...sourceFolder,
+              id: newId,
+              name:
+                sourceFolder.id === rootFolder.id
+                  ? `${sourceFolder.name} Copy`
+                  : sourceFolder.name,
+              parentFolderId:
+                sourceFolder.parentFolderId && idMap.has(sourceFolder.parentFolderId)
+                  ? idMap.get(sourceFolder.parentFolderId)
+                  : sourceFolder.id === rootFolder.id
+                    ? rootFolder.parentFolderId
+                    : sourceFolder.parentFolderId,
+              createdAt: now,
+              updatedAt: now,
+              expanded: true,
+            };
+          });
+
+        const duplicatedRequests = snapshot.requests
+          .filter(
+            (request) =>
+              request.collectionId === rootFolder.collectionId &&
+              request.folderId &&
+              sourceSet.has(request.folderId),
+          )
+          .map((request) => {
+            const newRequestId = generateId("req");
+            return {
+              ...request,
+              id: newRequestId,
+              folderId: request.folderId ? idMap.get(request.folderId) : undefined,
+              name: `${request.name} Copy`,
+              createdAt: now,
+              updatedAt: now,
+            };
+          });
+
+        const duplicatedRequestIds = duplicatedRequests.map((request) => request.id);
+
+        return {
+          ...snapshot,
+          collectionFolders: [...allFolders, ...duplicatedFolders],
+          requests: [...snapshot.requests, ...duplicatedRequests],
+          collections: snapshot.collections.map((collection) =>
+            collection.id === rootFolder.collectionId
+              ? {
+                  ...collection,
+                  requestIds: [...collection.requestIds, ...duplicatedRequestIds],
+                  updatedAt: now,
+                }
+              : collection,
+          ),
+          selectedRequestId: duplicatedRequestIds[0] ?? snapshot.selectedRequestId,
+          openRequestIds:
+            duplicatedRequestIds.length > 0
+              ? [
+                  duplicatedRequestIds[0],
+                  ...(snapshot.openRequestIds ?? []).filter(
+                    (id) => id !== duplicatedRequestIds[0],
+                  ),
+                ]
+              : snapshot.openRequestIds,
+        };
+      });
+    },
+
     toggleCollectionFolder: (folderId) => {
       updateSnapshot((snapshot) => ({
         ...snapshot,
@@ -470,6 +633,88 @@ export const useAppStore = create<AppStoreState>((set) => {
             : folder,
         ),
       }));
+    },
+
+    moveRequestToFolder: (requestId, folderId) => {
+      updateSnapshot((snapshot) => {
+        const targetRequest = snapshot.requests.find((request) => request.id === requestId);
+        if (!targetRequest) {
+          return snapshot;
+        }
+
+        const isFolderValid =
+          !folderId ||
+          (snapshot.collectionFolders ?? []).some(
+            (folder) =>
+              folder.id === folderId && folder.collectionId === targetRequest.collectionId,
+          );
+        if (!isFolderValid) {
+          return snapshot;
+        }
+
+        return {
+          ...snapshot,
+          requests: snapshot.requests.map((request) =>
+            request.id === requestId
+              ? {
+                  ...request,
+                  folderId,
+                  updatedAt: new Date().toISOString(),
+                }
+              : request,
+          ),
+        };
+      });
+    },
+
+    deleteRequest: (requestId) => {
+      updateSnapshot((snapshot) => ({
+        ...snapshot,
+        requests: snapshot.requests.filter((request) => request.id !== requestId),
+        collections: snapshot.collections.map((collection) => ({
+          ...collection,
+          requestIds: collection.requestIds.filter((id) => id !== requestId),
+        })),
+        openRequestIds: (snapshot.openRequestIds ?? []).filter((id) => id !== requestId),
+      }));
+    },
+
+    duplicateRequest: (requestId) => {
+      updateSnapshot((snapshot) => {
+        const source = snapshot.requests.find((request) => request.id === requestId);
+        if (!source) {
+          return snapshot;
+        }
+
+        const now = new Date().toISOString();
+        const nextRequestId = generateId("req");
+        const duplicated: ApiRequest = {
+          ...source,
+          id: nextRequestId,
+          name: `${source.name} Copy`,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        return {
+          ...snapshot,
+          requests: [...snapshot.requests, duplicated],
+          collections: snapshot.collections.map((collection) =>
+            collection.id === source.collectionId
+              ? {
+                  ...collection,
+                  requestIds: [...collection.requestIds, nextRequestId],
+                  updatedAt: now,
+                }
+              : collection,
+          ),
+          selectedRequestId: nextRequestId,
+          openRequestIds: [
+            nextRequestId,
+            ...(snapshot.openRequestIds ?? []).filter((id) => id !== nextRequestId),
+          ],
+        };
+      });
     },
 
     updateWorkspaceGlobals: (payload) => {

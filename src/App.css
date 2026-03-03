@@ -289,29 +289,55 @@ body {
   border-color: rgba(117, 167, 255, 0.6);
 }
 
+.icon-btn-sm.danger {
+  border-color: rgba(255, 125, 155, 0.48);
+  color: #ffc0cf;
+}
+
+.icon-btn-sm.danger:hover {
+  border-color: rgba(255, 125, 155, 0.8);
+  background: rgba(222, 76, 113, 0.2);
+}
+
 .tree-request-item {
   width: 100%;
   border: 1px solid transparent;
   background: rgba(255, 255, 255, 0.02);
   border-radius: var(--radius-md);
-  text-align: left;
-  cursor: pointer;
   color: var(--ink-1);
-  padding: 9px 10px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 8px;
+  overflow: hidden;
 }
 
 .tree-request-item:hover {
   border-color: rgba(123, 171, 250, 0.5);
-  transform: translateX(2px);
-  transition: all 180ms ease;
+  transition: border-color 180ms ease;
 }
 
 .tree-request-item.active {
   border-color: rgba(73, 219, 170, 0.7);
   background: linear-gradient(135deg, rgba(54, 188, 139, 0.24), rgba(64, 110, 201, 0.24));
+}
+
+.tree-request-main {
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+}
+
+.tree-request-actions {
+  display: inline-flex;
+  gap: 4px;
+  padding-right: 6px;
 }
 
 .tree-request-title {
@@ -834,6 +860,10 @@ body {
   gap: 10px;
 }
 
+.compact-modal {
+  width: min(520px, calc(100vw - 30px));
+}
+
 .globals-modal {
   width: min(1080px, calc(100vw - 30px));
 }
@@ -842,6 +872,23 @@ body {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dialog-field {
+  display: grid;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.dialog-field input,
+.dialog-field select {
+  border: 1px solid var(--line);
+  background: rgba(16, 24, 40, 0.9);
+  color: var(--ink-1);
+  border-radius: 11px;
+  padding: 10px 11px;
+  font-size: 14px;
 }
 
 .curl-modal header {

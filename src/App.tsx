@@ -10,6 +10,7 @@ import "./App.css";
 import { SIDEBAR_SECTIONS } from "./domain/constants";
 import type {
   AuthConfig,
+  CollectionFolder,
   EnvironmentVariable,
   HttpMethod,
   KeyValue,
@@ -53,6 +54,16 @@ type EditableRow = {
   value: string;
   enabled: boolean;
 };
+
+type FolderDialogState =
+  | {
+      mode: "create";
+      parentFolderId?: string;
+    }
+  | {
+      mode: "rename";
+      folderId: string;
+    };
 
 function bytesToReadable(size: number): string {
   if (size < 1024) {
@@ -212,7 +223,13 @@ function App() {
   const closeRequestTab = useAppStore((state) => state.closeRequestTab);
   const createRequest = useAppStore((state) => state.createRequest);
   const createCollectionFolder = useAppStore((state) => state.createCollectionFolder);
+  const renameCollectionFolder = useAppStore((state) => state.renameCollectionFolder);
+  const deleteCollectionFolder = useAppStore((state) => state.deleteCollectionFolder);
+  const duplicateCollectionFolder = useAppStore((state) => state.duplicateCollectionFolder);
   const toggleCollectionFolder = useAppStore((state) => state.toggleCollectionFolder);
+  const moveRequestToFolder = useAppStore((state) => state.moveRequestToFolder);
+  const deleteRequest = useAppStore((state) => state.deleteRequest);
+  const duplicateRequest = useAppStore((state) => state.duplicateRequest);
   const updateSelectedRequest = useAppStore((state) => state.updateSelectedRequest);
   const updateWorkspaceGlobals = useAppStore((state) => state.updateWorkspaceGlobals);
   const recordHistory = useAppStore((state) => state.recordHistory);
@@ -229,6 +246,12 @@ function App() {
   const [isGlobalsOpen, setIsGlobalsOpen] = useState(false);
   const [globalHeadersDraft, setGlobalHeadersDraft] = useState<KeyValue[]>([]);
   const [globalVariablesDraft, setGlobalVariablesDraft] = useState<EnvironmentVariable[]>([]);
+  const [folderDialog, setFolderDialog] = useState<FolderDialogState | null>(null);
+  const [folderNameDraft, setFolderNameDraft] = useState("");
+  const [isMoveRequestOpen, setIsMoveRequestOpen] = useState(false);
+  const [movingRequestId, setMovingRequestId] = useState<string | null>(null);
+  const [movingFolderDraft, setMovingFolderDraft] = useState("__root");
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     void useAppStore.getState().load();
@@ -243,7 +266,12 @@ function App() {
   const selectedEnvironment = getSelectedEnvironment(data);
   const globalHeaders = getGlobalHeadersForActiveWorkspace(data);
   const globalVariables = getGlobalVariablesForActiveWorkspace(data);
+  const folderById = useMemo(
+    () => new Map(folders.map((folder) => [folder.id, folder] as const)),
+    [folders],
+  );
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId);
+  const movingRequest = requests.find((request) => request.id === movingRequestId);
   const history = data.history
     .filter((entry) => entry.workspaceId === data.selectedWorkspaceId)
     .slice(0, 24);
@@ -258,11 +286,46 @@ function App() {
   }, [data.selectedCollectionId]);
 
   useEffect(() => {
+    if (selectedFolderId && !folderById.has(selectedFolderId)) {
+      setSelectedFolderId(undefined);
+    }
+  }, [selectedFolderId, folderById]);
+
+  useEffect(() => {
     if (isGlobalsOpen) {
       setGlobalHeadersDraft(globalHeaders.map((item) => ({ ...item })));
       setGlobalVariablesDraft(globalVariables.map((item) => ({ ...item })));
     }
   }, [isGlobalsOpen, globalHeaders, globalVariables]);
+
+  useEffect(() => {
+    if (!folderDialog) {
+      setFolderNameDraft("");
+      return;
+    }
+
+    if (folderDialog.mode === "rename") {
+      const folder = folderById.get(folderDialog.folderId);
+      setFolderNameDraft(folder?.name ?? "");
+      return;
+    }
+
+    setFolderNameDraft("");
+  }, [folderDialog, folderById]);
+
+  useEffect(() => {
+    if (!actionMessage) {
+      return;
+    }
+
+    const timer = globalThis.window.setTimeout(() => {
+      setActionMessage(null);
+    }, 2400);
+
+    return () => {
+      globalThis.window.clearTimeout(timer);
+    };
+  }, [actionMessage]);
 
   const responsePretty = useMemo(
     () => (runtimeResponse ? formatJson(runtimeResponse.body) : ""),
@@ -395,13 +458,112 @@ function App() {
     closeRequestTab(requestId);
   };
 
-  const createFolderPrompt = (parentFolderId?: string) => {
-    const name = window.prompt("Folder name");
-    if (!name || !name.trim()) {
+  const openCreateFolderDialog = (parentFolderId?: string) => {
+    setFolderDialog({ mode: "create", parentFolderId });
+  };
+
+  const openRenameFolderDialog = (folder: CollectionFolder) => {
+    setFolderDialog({ mode: "rename", folderId: folder.id });
+  };
+
+  const submitFolderDialog = () => {
+    if (!folderDialog) {
       return;
     }
 
-    createCollectionFolder({ name: name.trim(), parentFolderId });
+    const name = folderNameDraft.trim();
+    if (!name) {
+      setActionMessage("Folder name is required");
+      return;
+    }
+
+    if (folderDialog.mode === "create") {
+      createCollectionFolder({
+        name,
+        parentFolderId: folderDialog.parentFolderId,
+      });
+      setActionMessage("Folder created");
+    } else {
+      renameCollectionFolder(folderDialog.folderId, name);
+      setActionMessage("Folder renamed");
+    }
+
+    setFolderDialog(null);
+  };
+
+  const removeFolder = (folder: CollectionFolder) => {
+    deleteCollectionFolder(folder.id);
+    if (selectedFolderId === folder.id) {
+      setSelectedFolderId(folder.parentFolderId);
+    }
+    setActionMessage("Folder deleted");
+  };
+
+  const cloneFolder = (folder: CollectionFolder) => {
+    duplicateCollectionFolder(folder.id);
+    setActionMessage("Folder duplicated");
+  };
+
+  const openMoveRequestDialog = (requestId: string) => {
+    const request = requests.find((item) => item.id === requestId);
+    if (!request) {
+      return;
+    }
+
+    setMovingRequestId(requestId);
+    setMovingFolderDraft(request.folderId ?? "__root");
+    setIsMoveRequestOpen(true);
+  };
+
+  const submitMoveRequest = () => {
+    if (!movingRequestId) {
+      return;
+    }
+
+    moveRequestToFolder(
+      movingRequestId,
+      movingFolderDraft === "__root" ? undefined : movingFolderDraft,
+    );
+    setIsMoveRequestOpen(false);
+    setMovingRequestId(null);
+    setActionMessage("Request moved");
+  };
+
+  const removeRequest = (requestId: string) => {
+    deleteRequest(requestId);
+    setActionMessage("Request deleted");
+  };
+
+  const cloneRequest = (requestId: string) => {
+    duplicateRequest(requestId);
+    setActionMessage("Request duplicated");
+  };
+
+  const copyRequest = async (requestId: string) => {
+    const request = requests.find((item) => item.id === requestId);
+    if (!request) {
+      return;
+    }
+
+    try {
+      await globalThis.navigator.clipboard.writeText(
+        JSON.stringify(
+          {
+            method: request.method,
+            url: request.url,
+            headers: request.headers,
+            queryParams: request.queryParams,
+            auth: request.auth,
+            body: request.body ?? "",
+          },
+          null,
+          2,
+        ),
+      );
+      setActionMessage("Request JSON copied");
+    } catch {
+      setActionMessage("Clipboard not available");
+    }
   };
 
   const importCurl = () => {
@@ -551,10 +713,34 @@ function App() {
               <button
                 type="button"
                 className="icon-btn-sm"
-                onClick={() => createFolderPrompt(folder.id)}
+                onClick={() => openCreateFolderDialog(folder.id)}
                 title="Add subfolder"
               >
                 F+
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => openRenameFolderDialog(folder)}
+                title="Rename folder"
+              >
+                R
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => cloneFolder(folder)}
+                title="Duplicate folder"
+              >
+                D
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm danger"
+                onClick={() => removeFolder(folder)}
+                title="Delete folder"
+              >
+                X
               </button>
             </div>
           </div>
@@ -566,15 +752,59 @@ function App() {
     directRequests.forEach((request) => {
       nodes.push(
         <li key={request.id} className="tree-node">
-          <button
-            type="button"
-            className={request.id === data.selectedRequestId ? "tree-request-item active" : "tree-request-item"}
-            style={{ paddingLeft: `${26 + depth * 16}px` }}
-            onClick={() => selectRequest(request.id)}
+          <div
+            className={
+              request.id === data.selectedRequestId
+                ? "tree-request-item active"
+                : "tree-request-item"
+            }
           >
-            <span className={`method-badge ${getMethodColor(request.method)}`}>{request.method}</span>
-            <span className="tree-request-title">{request.name}</span>
-          </button>
+            <button
+              type="button"
+              className="tree-request-main"
+              style={{ paddingLeft: `${26 + depth * 16}px` }}
+              onClick={() => selectRequest(request.id)}
+            >
+              <span className={`method-badge ${getMethodColor(request.method)}`}>
+                {request.method}
+              </span>
+              <span className="tree-request-title">{request.name}</span>
+            </button>
+            <div className="tree-request-actions">
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => cloneRequest(request.id)}
+                title="Duplicate request"
+              >
+                D
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => copyRequest(request.id)}
+                title="Copy request JSON"
+              >
+                C
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => openMoveRequestDialog(request.id)}
+                title="Move request"
+              >
+                M
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm danger"
+                onClick={() => removeRequest(request.id)}
+                title="Delete request"
+              >
+                X
+              </button>
+            </div>
+          </div>
         </li>,
       );
     });
@@ -648,11 +878,26 @@ function App() {
         {activeSection === "Collections" ? (
           <>
             <div className="catalog-actions">
-              <button type="button" className="outline-btn" onClick={() => createRequest({ folderId: selectedFolderId })}>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => createRequest({ folderId: selectedFolderId })}
+              >
                 + Request
               </button>
-              <button type="button" className="outline-btn" onClick={() => createFolderPrompt(selectedFolderId)}>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => openCreateFolderDialog(selectedFolderId)}
+              >
                 + Folder
+              </button>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => setSelectedFolderId(undefined)}
+              >
+                Root
               </button>
             </div>
             {selectedFolderId ? (
@@ -662,6 +907,7 @@ function App() {
             ) : (
               <p className="selected-folder-pill">Folder selected: root</p>
             )}
+            {actionMessage ? <p className="selected-folder-pill">{actionMessage}</p> : null}
             <ul className="tree-root">{renderCollectionTree(undefined, 0)}</ul>
           </>
         ) : null}
@@ -1090,6 +1336,94 @@ function App() {
           </section>
         )}
       </section>
+
+      {folderDialog ? (
+        <div className="curl-modal-backdrop">
+          <div className="curl-modal compact-modal">
+            <header>
+              <h3>
+                {folderDialog.mode === "create"
+                  ? "Create Folder"
+                  : "Rename Folder"}
+              </h3>
+              <button type="button" onClick={() => setFolderDialog(null)}>
+                x
+              </button>
+            </header>
+            <label className="dialog-field">
+              Folder name
+              <input
+                value={folderNameDraft}
+                onChange={(event) => setFolderNameDraft(event.currentTarget.value)}
+                placeholder="New Folder"
+              />
+            </label>
+            <footer>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => setFolderDialog(null)}
+              >
+                Cancel
+              </button>
+              <button type="button" className="send-button" onClick={submitFolderDialog}>
+                {folderDialog.mode === "create" ? "Create" : "Save"}
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+
+      {isMoveRequestOpen ? (
+        <div className="curl-modal-backdrop">
+          <div className="curl-modal compact-modal">
+            <header>
+              <h3>Move Request</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMoveRequestOpen(false);
+                  setMovingRequestId(null);
+                }}
+              >
+                x
+              </button>
+            </header>
+            <p className="hint">
+              {movingRequest ? `Request: ${movingRequest.name}` : "Select target folder"}
+            </p>
+            <label className="dialog-field">
+              Destination
+              <select
+                value={movingFolderDraft}
+                onChange={(event) => setMovingFolderDraft(event.currentTarget.value)}
+              >
+                <option value="__root">Root</option>
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <footer>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => {
+                  setIsMoveRequestOpen(false);
+                  setMovingRequestId(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button type="button" className="send-button" onClick={submitMoveRequest}>
+                Move
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
 
       {isCurlOpen ? (
         <div className="curl-modal-backdrop">
