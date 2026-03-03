@@ -222,6 +222,12 @@ function normalizeAuth(auth?: AuthConfig): AuthConfig {
   return { type: "none" };
 }
 
+const SIDEBAR_SHORT_LABELS: Record<SidebarSection, string> = {
+  Collections: "API",
+  History: "HIS",
+  Environments: "ENV",
+};
+
 function App() {
   const isLoaded = useAppStore((state) => state.isLoaded);
   const isSaving = useAppStore((state) => state.isSaving);
@@ -1208,7 +1214,7 @@ function App() {
               onClick={() => setActiveSection(section)}
               title={section}
             >
-              {section.slice(0, 1)}
+              {SIDEBAR_SHORT_LABELS[section]}
             </button>
           ))}
         </div>
@@ -1432,9 +1438,11 @@ function App() {
 
       <section className="main-pane motion-enter delay-2">
         <header className="top-bar">
-          <div>
-            <h2>{activeRequest ? activeRequest.name : "No request selected"}</h2>
-            <p>RequestPorter · folders, globals and real requests</p>
+          <div className="top-heading">
+            <h2 className="top-title">
+              {activeRequest ? activeRequest.name : "No request selected"}
+            </h2>
+            <p className="top-subtitle">RequestPorter · folders, globals and real requests</p>
           </div>
           <div className="top-actions">
             <label className="env-select">
@@ -1476,7 +1484,7 @@ function App() {
                   <span className={`method-badge ${getMethodColor(request.method)}`}>
                     {request.method}
                   </span>
-                  <span>{request.name}</span>
+                  <span className="request-tab-label">{request.name}</span>
                   <span className="request-tab-close" onClick={(event) => closeTab(event, request.id)}>
                     ×
                   </span>
