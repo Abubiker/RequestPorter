@@ -6,7 +6,9 @@ import type {
   AppSnapshot,
   AuthConfig,
   Collection,
+  CollectionFolder,
   Environment,
+  EnvironmentVariable,
   ApiRequest,
   HttpMethod,
   KeyValue,
@@ -32,6 +34,17 @@ interface CreateRequestPayload {
   queryParams?: KeyValue[];
   auth?: AuthConfig;
   name?: string;
+  folderId?: string;
+}
+
+interface CreateFolderPayload {
+  name: string;
+  parentFolderId?: string;
+}
+
+interface UpdateWorkspaceGlobalsPayload {
+  globalHeaders?: KeyValue[];
+  globalVariables?: EnvironmentVariable[];
 }
 
 interface RecordHistoryPayload {
@@ -54,24 +67,31 @@ interface AppStoreState {
   setActiveSection: (section: SidebarSection) => void;
   selectWorkspace: (workspaceId: string) => void;
   selectCollection: (collectionId: string) => void;
+  selectEnvironment: (environmentId: string) => void;
   selectRequest: (requestId: string) => void;
   closeRequestTab: (requestId: string) => void;
   updateSelectedRequest: (payload: UpdateSelectedRequestPayload) => void;
   createRequest: (payload?: CreateRequestPayload) => void;
+  createCollectionFolder: (payload: CreateFolderPayload) => void;
+  toggleCollectionFolder: (folderId: string) => void;
+  updateWorkspaceGlobals: (payload: UpdateWorkspaceGlobalsPayload) => void;
   recordHistory: (payload: RecordHistoryPayload) => void;
 }
 
 const repository = new LocalSnapshotRepository();
 
 function buildRequestName(method: HttpMethod, url: string): string {
-  try {
-    const parsed = new URL(url);
-    const path = `${parsed.pathname}${parsed.search}` || "/";
-    return `${method} ${path}`;
-  } catch {
-    const path = url.replace(/^https?:\/\/[^/]+/, "");
-    return `${method} ${path || "/"}`;
-  }
+  const normalized = url.replace(/^https?:\/\/[^/]+/, "");
+  const path = normalized || "/";
+  return `${method} ${path}`;
+}
+
+function normalizeWorkspace(workspace: Workspace): Workspace {
+  return {
+    ...workspace,
+    globalHeaders: workspace.globalHeaders ?? [],
+    globalVariables: workspace.globalVariables ?? [],
+  };
 }
 
 function getRequestsByCollection(snapshot: AppSnapshot, collectionId: string): ApiRequest[] {
@@ -82,25 +102,46 @@ function getCollectionsByWorkspace(snapshot: AppSnapshot, workspaceId: string): 
   return snapshot.collections.filter((collection) => collection.workspaceId === workspaceId);
 }
 
+function getEnvironmentsByWorkspace(snapshot: AppSnapshot, workspaceId: string): Environment[] {
+  return snapshot.environments.filter((environment) => environment.workspaceId === workspaceId);
+}
+
 function ensureSelection(snapshot: AppSnapshot): AppSnapshot {
+  const workspaces = snapshot.workspaces.map(normalizeWorkspace);
+  const collectionFolders = snapshot.collectionFolders ?? [];
+
   const selectedWorkspace =
-    snapshot.workspaces.find((workspace) => workspace.id === snapshot.selectedWorkspaceId) ??
-    snapshot.workspaces[0];
-
+    workspaces.find((workspace) => workspace.id === snapshot.selectedWorkspaceId) ?? workspaces[0];
   const selectedWorkspaceId = selectedWorkspace?.id ?? "";
-  const workspaceCollections = getCollectionsByWorkspace(snapshot, selectedWorkspaceId);
 
+  const workspaceCollections = getCollectionsByWorkspace(
+    { ...snapshot, workspaces, collectionFolders },
+    selectedWorkspaceId,
+  );
   const selectedCollection =
     workspaceCollections.find(
       (collection) => collection.id === snapshot.selectedCollectionId,
     ) ?? workspaceCollections[0];
   const selectedCollectionId = selectedCollection?.id ?? "";
 
-  const collectionRequests = getRequestsByCollection(snapshot, selectedCollectionId);
+  const collectionRequests = getRequestsByCollection(
+    { ...snapshot, workspaces, collectionFolders },
+    selectedCollectionId,
+  );
   const selectedRequest =
     collectionRequests.find((request) => request.id === snapshot.selectedRequestId) ??
     collectionRequests[0];
   const selectedRequestId = selectedRequest?.id ?? "";
+
+  const workspaceEnvironments = getEnvironmentsByWorkspace(
+    { ...snapshot, workspaces, collectionFolders },
+    selectedWorkspaceId,
+  );
+  const selectedEnvironment =
+    workspaceEnvironments.find(
+      (environment) => environment.id === snapshot.selectedEnvironmentId,
+    ) ?? workspaceEnvironments[0];
+  const selectedEnvironmentId = selectedEnvironment?.id ?? "";
 
   const validRequestIds = new Set(collectionRequests.map((request) => request.id));
   let openRequestIds = (snapshot.openRequestIds ?? []).filter((id) => validRequestIds.has(id));
@@ -108,16 +149,18 @@ function ensureSelection(snapshot: AppSnapshot): AppSnapshot {
   if (selectedRequestId && !openRequestIds.includes(selectedRequestId)) {
     openRequestIds = [selectedRequestId, ...openRequestIds];
   }
-
   if (openRequestIds.length === 0 && selectedRequestId) {
     openRequestIds = [selectedRequestId];
   }
 
   return {
     ...snapshot,
+    workspaces,
+    collectionFolders,
     selectedWorkspaceId,
     selectedCollectionId,
     selectedRequestId,
+    selectedEnvironmentId,
     openRequestIds,
   };
 }
@@ -141,6 +184,12 @@ export function getCollectionsForActiveWorkspace(snapshot: AppSnapshot): Collect
 export function getActiveCollection(snapshot: AppSnapshot): Collection | undefined {
   return snapshot.collections.find(
     (collection) => collection.id === snapshot.selectedCollectionId,
+  );
+}
+
+export function getFoldersForActiveCollection(snapshot: AppSnapshot): CollectionFolder[] {
+  return (snapshot.collectionFolders ?? []).filter(
+    (folder) => folder.collectionId === snapshot.selectedCollectionId,
   );
 }
 
@@ -170,6 +219,20 @@ export function getEnvironmentsForActiveWorkspace(snapshot: AppSnapshot): Enviro
   return snapshot.environments.filter(
     (environment) => environment.workspaceId === snapshot.selectedWorkspaceId,
   );
+}
+
+export function getSelectedEnvironment(snapshot: AppSnapshot): Environment | undefined {
+  return snapshot.environments.find(
+    (environment) => environment.id === snapshot.selectedEnvironmentId,
+  );
+}
+
+export function getGlobalHeadersForActiveWorkspace(snapshot: AppSnapshot): KeyValue[] {
+  return getActiveWorkspace(snapshot)?.globalHeaders ?? [];
+}
+
+export function getGlobalVariablesForActiveWorkspace(snapshot: AppSnapshot): EnvironmentVariable[] {
+  return getActiveWorkspace(snapshot)?.globalVariables ?? [];
 }
 
 export const useAppStore = create<AppStoreState>((set) => {
@@ -211,7 +274,7 @@ export const useAppStore = create<AppStoreState>((set) => {
         });
       } catch (error) {
         set({
-          data: createSeedSnapshot(),
+          data: ensureSelection(createSeedSnapshot()),
           isLoaded: true,
           errorMessage: getErrorMessage(error),
         });
@@ -228,12 +291,15 @@ export const useAppStore = create<AppStoreState>((set) => {
         const selectedCollectionId = workspaceCollections[0]?.id ?? "";
         const selectedRequestId =
           getRequestsByCollection(snapshot, selectedCollectionId)[0]?.id ?? "";
+        const selectedEnvironmentId =
+          getEnvironmentsByWorkspace(snapshot, workspaceId)[0]?.id ?? "";
 
         return {
           ...snapshot,
           selectedWorkspaceId: workspaceId,
           selectedCollectionId,
           selectedRequestId,
+          selectedEnvironmentId,
           openRequestIds: selectedRequestId ? [selectedRequestId] : [],
         };
       });
@@ -250,6 +316,13 @@ export const useAppStore = create<AppStoreState>((set) => {
           openRequestIds: selectedRequestId ? [selectedRequestId] : [],
         };
       });
+    },
+
+    selectEnvironment: (environmentId) => {
+      updateSnapshot((snapshot) => ({
+        ...snapshot,
+        selectedEnvironmentId: environmentId,
+      }));
     },
 
     selectRequest: (requestId) => {
@@ -322,13 +395,14 @@ export const useAppStore = create<AppStoreState>((set) => {
       updateSnapshot((snapshot) => {
         const now = new Date().toISOString();
         const method = payload?.method ?? "GET";
-        const url = payload?.url ?? "https://jsonplaceholder.typicode.com/todos/1";
+        const url = payload?.url ?? "{{baseUrl}}/todos/1";
         const requestId = generateId("req");
 
         const newRequest: ApiRequest = {
           id: requestId,
           workspaceId: snapshot.selectedWorkspaceId,
           collectionId: snapshot.selectedCollectionId,
+          folderId: payload?.folderId,
           name: payload?.name ?? buildRequestName(method, url),
           method,
           url,
@@ -361,6 +435,57 @@ export const useAppStore = create<AppStoreState>((set) => {
           ],
         };
       });
+    },
+
+    createCollectionFolder: (payload) => {
+      updateSnapshot((snapshot) => {
+        const now = new Date().toISOString();
+        const folder: CollectionFolder = {
+          id: generateId("folder"),
+          workspaceId: snapshot.selectedWorkspaceId,
+          collectionId: snapshot.selectedCollectionId,
+          name: payload.name,
+          parentFolderId: payload.parentFolderId,
+          expanded: true,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        return {
+          ...snapshot,
+          collectionFolders: [...(snapshot.collectionFolders ?? []), folder],
+        };
+      });
+    },
+
+    toggleCollectionFolder: (folderId) => {
+      updateSnapshot((snapshot) => ({
+        ...snapshot,
+        collectionFolders: (snapshot.collectionFolders ?? []).map((folder) =>
+          folder.id === folderId
+            ? {
+                ...folder,
+                expanded: !(folder.expanded ?? true),
+              }
+            : folder,
+        ),
+      }));
+    },
+
+    updateWorkspaceGlobals: (payload) => {
+      updateSnapshot((snapshot) => ({
+        ...snapshot,
+        workspaces: snapshot.workspaces.map((workspace) =>
+          workspace.id === snapshot.selectedWorkspaceId
+            ? {
+                ...workspace,
+                globalHeaders: payload.globalHeaders ?? workspace.globalHeaders ?? [],
+                globalVariables: payload.globalVariables ?? workspace.globalVariables ?? [],
+                updatedAt: new Date().toISOString(),
+              }
+            : workspace,
+        ),
+      }));
     },
 
     recordHistory: (payload) => {

@@ -1,6 +1,7 @@
 import type {
   AppSnapshot,
   Collection,
+  CollectionFolder,
   Environment,
   ApiRequest,
   Workspace,
@@ -23,6 +24,28 @@ function buildWorkspace(now: string): Workspace {
         role: "owner",
       },
     ],
+    globalVariables: [
+      {
+        id: "ws_var_base_url",
+        key: "baseUrl",
+        value: "https://jsonplaceholder.typicode.com",
+        enabled: true,
+      },
+      {
+        id: "ws_var_auth_token",
+        key: "authToken",
+        value: "demo-token",
+        enabled: true,
+      },
+    ],
+    globalHeaders: [
+      {
+        id: "ws_header_app",
+        key: "X-App-Client",
+        value: "RequestPorter",
+        enabled: true,
+      },
+    ],
     createdAt: now,
     updatedAt: now,
   };
@@ -39,15 +62,43 @@ function buildCollection(workspaceId: string, now: string): Collection {
   };
 }
 
+function buildCollectionFolders(
+  workspaceId: string,
+  collectionId: string,
+  now: string,
+): CollectionFolder[] {
+  return [
+    {
+      id: "folder_users",
+      workspaceId,
+      collectionId,
+      name: "Users",
+      expanded: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "folder_posts",
+      workspaceId,
+      collectionId,
+      name: "Posts",
+      expanded: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+}
+
 function buildRequests(workspaceId: string, collectionId: string, now: string): ApiRequest[] {
   return [
     {
       id: "req_health",
       workspaceId,
       collectionId,
-      name: "GET /todos/1",
+      folderId: "folder_users",
+      name: "GET {{baseUrl}}/todos/1",
       method: "GET",
-      url: "https://jsonplaceholder.typicode.com/todos/1",
+      url: "{{baseUrl}}/todos/1",
       headers: [],
       queryParams: [],
       auth: { type: "none" },
@@ -58,9 +109,10 @@ function buildRequests(workspaceId: string, collectionId: string, now: string): 
       id: "req_login",
       workspaceId,
       collectionId,
-      name: "POST /posts",
+      folderId: "folder_posts",
+      name: "POST {{baseUrl}}/posts",
       method: "POST",
-      url: "https://jsonplaceholder.typicode.com/posts",
+      url: "{{baseUrl}}/posts",
       headers: [
         {
           id: "header_content_type",
@@ -70,7 +122,7 @@ function buildRequests(workspaceId: string, collectionId: string, now: string): 
         },
       ],
       queryParams: [],
-      auth: { type: "none" },
+      auth: { type: "bearer", value: "{{authToken}}" },
       body: '{"title":"RequestPorter","body":"hello from desktop app","userId":1}',
       createdAt: now,
       updatedAt: now,
@@ -108,12 +160,14 @@ export function createSeedSnapshot(): AppSnapshot {
     version: 1,
     workspaces: [workspace],
     collections: [collection],
+    collectionFolders: buildCollectionFolders(workspace.id, collection.id, now),
     requests,
     environments: buildEnvironments(workspace.id, now),
     history: [],
     selectedWorkspaceId: workspace.id,
     selectedCollectionId: collection.id,
     selectedRequestId: requests[0].id,
+    selectedEnvironmentId: "env_dev",
     openRequestIds: [requests[0].id],
   };
 }

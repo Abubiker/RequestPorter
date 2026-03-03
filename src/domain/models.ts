@@ -23,6 +23,8 @@ export interface Workspace {
   name: string;
   type: WorkspaceType;
   members: WorkspaceMember[];
+  globalHeaders?: KeyValue[];
+  globalVariables?: EnvironmentVariable[];
   createdAt: string;
   updatedAt: string;
 }
@@ -45,6 +47,7 @@ export interface ApiRequest {
   id: string;
   workspaceId: string;
   collectionId: string;
+  folderId?: string;
   name: string;
   method: HttpMethod;
   url: string;
@@ -61,6 +64,17 @@ export interface Collection {
   workspaceId: string;
   name: string;
   requestIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollectionFolder {
+  id: string;
+  workspaceId: string;
+  collectionId: string;
+  name: string;
+  parentFolderId?: string;
+  expanded?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -104,11 +118,13 @@ export interface AppSnapshot {
   version: 1;
   workspaces: Workspace[];
   collections: Collection[];
+  collectionFolders?: CollectionFolder[];
   requests: ApiRequest[];
   environments: Environment[];
   history: HistoryEntry[];
   selectedWorkspaceId: string;
   selectedCollectionId: string;
   selectedRequestId: string;
+  selectedEnvironmentId?: string;
   openRequestIds?: string[];
 }

@@ -1,14 +1,30 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent,
+  type ReactElement,
+} from "react";
 import "./App.css";
 import { SIDEBAR_SECTIONS } from "./domain/constants";
-import type { AuthConfig, HttpMethod, KeyValue, SidebarSection } from "./domain/models";
+import type {
+  AuthConfig,
+  EnvironmentVariable,
+  HttpMethod,
+  KeyValue,
+  SidebarSection,
+} from "./domain/models";
 import {
   getActiveRequest,
   getCollectionsForActiveWorkspace,
   getEnvironmentsForActiveWorkspace,
+  getFoldersForActiveCollection,
+  getGlobalHeadersForActiveWorkspace,
+  getGlobalVariablesForActiveWorkspace,
   getOpenRequests,
   getRequestsForActiveCollection,
+  getSelectedEnvironment,
   useAppStore,
 } from "./state/appStore";
 import { parseCurlCommand } from "./utils/curl";
@@ -30,6 +46,13 @@ interface RuntimeResponse {
   url: string;
   ok: boolean;
 }
+
+type EditableRow = {
+  id: string;
+  key: string;
+  value: string;
+  enabled: boolean;
+};
 
 function bytesToReadable(size: number): string {
   if (size < 1024) {
@@ -85,7 +108,7 @@ function getMethodColor(method: HttpMethod): string {
   }
 }
 
-function newKeyValue(prefix: "kv" | "header" | "query" = "kv"): KeyValue {
+function newKeyValue(prefix: "kv" | "header" | "query" | "var" = "kv"): KeyValue {
   return {
     id: `${prefix}_${Math.random().toString(36).slice(2, 10)}`,
     key: "",
@@ -101,7 +124,7 @@ function upsertItem(list: KeyValue[], key: string, value: string): KeyValue[] {
   );
 
   if (existingIndex === -1) {
-    return [...list, { id: newKeyValue("kv").id, key, value, enabled: true }];
+    return [...list, { ...newKeyValue("kv"), key, value }];
   }
 
   return list.map((item, index) =>
@@ -113,6 +136,44 @@ function upsertItem(list: KeyValue[], key: string, value: string): KeyValue[] {
         }
       : item,
   );
+}
+
+function mergePairs(base: KeyValue[], additions: KeyValue[]): KeyValue[] {
+  let next = [...base];
+  additions.forEach((item) => {
+    if (!item.enabled || !item.key.trim()) {
+      return;
+    }
+    next = upsertItem(next, item.key, item.value);
+  });
+  return next;
+}
+
+function interpolateTemplate(input: string, variables: Record<string, string>): string {
+  return input.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, rawKey: string) => {
+    const value = variables[rawKey];
+    return value ?? `{{${rawKey}}}`;
+  });
+}
+
+function buildVariablesMap(
+  globalVariables: EnvironmentVariable[],
+  environmentVariables: EnvironmentVariable[],
+): Record<string, string> {
+  const output: Record<string, string> = {};
+
+  globalVariables.forEach((item) => {
+    if (item.enabled && item.key.trim()) {
+      output[item.key.trim()] = item.value;
+    }
+  });
+  environmentVariables.forEach((item) => {
+    if (item.enabled && item.key.trim()) {
+      output[item.key.trim()] = item.value;
+    }
+  });
+
+  return output;
 }
 
 function normalizeAuth(auth?: AuthConfig): AuthConfig {
@@ -146,10 +207,14 @@ function App() {
   const setActiveSection = useAppStore((state) => state.setActiveSection);
   const selectWorkspace = useAppStore((state) => state.selectWorkspace);
   const selectCollection = useAppStore((state) => state.selectCollection);
+  const selectEnvironment = useAppStore((state) => state.selectEnvironment);
   const selectRequest = useAppStore((state) => state.selectRequest);
   const closeRequestTab = useAppStore((state) => state.closeRequestTab);
   const createRequest = useAppStore((state) => state.createRequest);
+  const createCollectionFolder = useAppStore((state) => state.createCollectionFolder);
+  const toggleCollectionFolder = useAppStore((state) => state.toggleCollectionFolder);
   const updateSelectedRequest = useAppStore((state) => state.updateSelectedRequest);
+  const updateWorkspaceGlobals = useAppStore((state) => state.updateWorkspaceGlobals);
   const recordHistory = useAppStore((state) => state.recordHistory);
 
   const [editorTab, setEditorTab] = useState<EditorTab>("params");
@@ -160,16 +225,25 @@ function App() {
   const [isCurlOpen, setIsCurlOpen] = useState(false);
   const [curlValue, setCurlValue] = useState("");
   const [curlError, setCurlError] = useState<string | null>(null);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | undefined>(undefined);
+  const [isGlobalsOpen, setIsGlobalsOpen] = useState(false);
+  const [globalHeadersDraft, setGlobalHeadersDraft] = useState<KeyValue[]>([]);
+  const [globalVariablesDraft, setGlobalVariablesDraft] = useState<EnvironmentVariable[]>([]);
 
   useEffect(() => {
     void useAppStore.getState().load();
   }, []);
 
   const collections = getCollectionsForActiveWorkspace(data);
+  const folders = getFoldersForActiveCollection(data);
   const requests = getRequestsForActiveCollection(data);
   const openRequests = getOpenRequests(data);
   const activeRequest = getActiveRequest(data);
   const environments = getEnvironmentsForActiveWorkspace(data);
+  const selectedEnvironment = getSelectedEnvironment(data);
+  const globalHeaders = getGlobalHeadersForActiveWorkspace(data);
+  const globalVariables = getGlobalVariablesForActiveWorkspace(data);
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId);
   const history = data.history
     .filter((entry) => entry.workspaceId === data.selectedWorkspaceId)
     .slice(0, 24);
@@ -178,6 +252,17 @@ function App() {
     setRuntimeError(null);
     setRuntimeResponse(null);
   }, [data.selectedRequestId]);
+
+  useEffect(() => {
+    setSelectedFolderId(undefined);
+  }, [data.selectedCollectionId]);
+
+  useEffect(() => {
+    if (isGlobalsOpen) {
+      setGlobalHeadersDraft(globalHeaders.map((item) => ({ ...item })));
+      setGlobalVariablesDraft(globalVariables.map((item) => ({ ...item })));
+    }
+  }, [isGlobalsOpen, globalHeaders, globalVariables]);
 
   const responsePretty = useMemo(
     () => (runtimeResponse ? formatJson(runtimeResponse.body) : ""),
@@ -189,6 +274,11 @@ function App() {
     History: `${history.length} records`,
     Environments: `${environments.length} env`,
   };
+
+  const variablesMap = useMemo(
+    () => buildVariablesMap(globalVariables, selectedEnvironment?.variables ?? []),
+    [globalVariables, selectedEnvironment],
+  );
 
   if (!isLoaded) {
     return (
@@ -252,6 +342,50 @@ function App() {
     );
   };
 
+  const updateDraftRow = (
+    rows: EditableRow[],
+    setRows: (nextRows: EditableRow[]) => void,
+    index: number,
+    field: "key" | "value" | "enabled",
+    value: string | boolean,
+  ) => {
+    setRows(
+      rows.map((item, currentIndex) =>
+        currentIndex === index
+          ? {
+              ...item,
+              [field]: value,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const removeDraftRow = (
+    rows: EditableRow[],
+    setRows: (nextRows: EditableRow[]) => void,
+    index: number,
+  ) => {
+    setRows(rows.filter((_, currentIndex) => currentIndex !== index));
+  };
+
+  const sanitizeRows = <T extends EditableRow>(rows: T[]): T[] => {
+    return rows
+      .map((item) => ({
+        ...item,
+        key: item.key.trim(),
+      }))
+      .filter((item) => item.key.length > 0);
+  };
+
+  const saveGlobals = () => {
+    updateWorkspaceGlobals({
+      globalHeaders: sanitizeRows(globalHeadersDraft),
+      globalVariables: sanitizeRows(globalVariablesDraft),
+    });
+    setIsGlobalsOpen(false);
+  };
+
   const updateAuth = (nextAuth: AuthConfig) => {
     updateSelectedRequest({ auth: normalizeAuth(nextAuth) });
   };
@@ -259,6 +393,15 @@ function App() {
   const closeTab = (event: MouseEvent<HTMLElement>, requestId: string) => {
     event.stopPropagation();
     closeRequestTab(requestId);
+  };
+
+  const createFolderPrompt = (parentFolderId?: string) => {
+    const name = window.prompt("Folder name");
+    if (!name || !name.trim()) {
+      return;
+    }
+
+    createCollectionFolder({ name: name.trim(), parentFolderId });
   };
 
   const importCurl = () => {
@@ -272,6 +415,7 @@ function App() {
         body: parsed.body,
         auth: parsed.auth,
         name: parsed.name,
+        folderId: selectedFolderId,
       });
       setCurlError(null);
       setCurlValue("");
@@ -294,7 +438,7 @@ function App() {
     let queryParams = [...activeRequest.queryParams];
 
     if (auth.type === "bearer" && auth.value) {
-      headers = upsertItem(headers, "Authorization", `Bearer ${auth.value}`);
+      headers = upsertItem(headers, "Authorization", auth.value.startsWith("Bearer ") ? auth.value : `Bearer ${auth.value}`);
     }
 
     if (auth.type === "apiKey" && auth.key && auth.value) {
@@ -305,14 +449,33 @@ function App() {
       }
     }
 
+    headers = mergePairs(globalHeaders, headers);
+
+    const resolvedUrl = interpolateTemplate(activeRequest.url, variablesMap);
+    const resolvedBody = interpolateTemplate(activeRequest.body ?? "", variablesMap);
+    const resolvedHeaders = headers
+      .filter((item) => item.enabled && item.key.trim())
+      .map((item) => ({
+        ...item,
+        key: interpolateTemplate(item.key, variablesMap),
+        value: interpolateTemplate(item.value, variablesMap),
+      }));
+    const resolvedQuery = queryParams
+      .filter((item) => item.enabled && item.key.trim())
+      .map((item) => ({
+        ...item,
+        key: interpolateTemplate(item.key, variablesMap),
+        value: interpolateTemplate(item.value, variablesMap),
+      }));
+
     try {
       const response = await invoke<RuntimeResponse>("send_http_request", {
         payload: {
           method: activeRequest.method,
-          url: activeRequest.url,
-          headers,
-          queryParams,
-          body: activeRequest.body ?? "",
+          url: resolvedUrl,
+          headers: resolvedHeaders,
+          queryParams: resolvedQuery,
+          body: resolvedBody,
           timeoutMs: 30_000,
         },
       });
@@ -333,7 +496,7 @@ function App() {
       recordHistory({
         requestId: activeRequest.id,
         method: activeRequest.method,
-        url: activeRequest.url,
+        url: resolvedUrl,
         statusCode: 0,
         durationMs: 0,
         responseSizeBytes: 0,
@@ -343,10 +506,86 @@ function App() {
     }
   };
 
+  const renderCollectionTree = (parentFolderId?: string, depth = 0): ReactElement[] => {
+    const folderKey = parentFolderId ?? "__root";
+    const childFolders = folders
+      .filter((folder) => (folder.parentFolderId ?? "__root") === folderKey)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const directRequests = requests.filter(
+      (request) => (request.folderId ?? "__root") === folderKey,
+    );
+
+    const nodes: ReactElement[] = [];
+
+    childFolders.forEach((folder) => {
+      const expanded = folder.expanded ?? true;
+      nodes.push(
+        <li key={folder.id} className="tree-node">
+          <div
+            className={selectedFolderId === folder.id ? "folder-row active" : "folder-row"}
+            style={{ paddingLeft: `${10 + depth * 16}px` }}
+          >
+            <button
+              type="button"
+              className="folder-toggle"
+              onClick={() => toggleCollectionFolder(folder.id)}
+            >
+              {expanded ? "▾" : "▸"}
+            </button>
+            <button
+              type="button"
+              className="folder-label"
+              onClick={() => setSelectedFolderId(folder.id)}
+            >
+              {folder.name}
+            </button>
+            <div className="folder-actions">
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => createRequest({ folderId: folder.id })}
+                title="Add request"
+              >
+                +
+              </button>
+              <button
+                type="button"
+                className="icon-btn-sm"
+                onClick={() => createFolderPrompt(folder.id)}
+                title="Add subfolder"
+              >
+                F+
+              </button>
+            </div>
+          </div>
+          {expanded ? <ul className="tree-children">{renderCollectionTree(folder.id, depth + 1)}</ul> : null}
+        </li>,
+      );
+    });
+
+    directRequests.forEach((request) => {
+      nodes.push(
+        <li key={request.id} className="tree-node">
+          <button
+            type="button"
+            className={request.id === data.selectedRequestId ? "tree-request-item active" : "tree-request-item"}
+            style={{ paddingLeft: `${26 + depth * 16}px` }}
+            onClick={() => selectRequest(request.id)}
+          >
+            <span className={`method-badge ${getMethodColor(request.method)}`}>{request.method}</span>
+            <span className="tree-request-title">{request.name}</span>
+          </button>
+        </li>,
+      );
+    });
+
+    return nodes;
+  };
+
   return (
     <main className="shell">
       <aside className="nav-rail motion-enter">
-        <div className="brand-avatar">E</div>
+        <div className="brand-avatar">R</div>
         <div className="rail-actions">
           {SIDEBAR_SECTIONS.map((section) => (
             <button
@@ -407,22 +646,24 @@ function App() {
         </div>
 
         {activeSection === "Collections" ? (
-          <ul className="request-list">
-            {requests.map((request) => (
-              <li key={request.id}>
-                <button
-                  type="button"
-                  className={request.id === data.selectedRequestId ? "request-item active" : "request-item"}
-                  onClick={() => selectRequest(request.id)}
-                >
-                  <span className={`method-badge ${getMethodColor(request.method)}`}>
-                    {request.method}
-                  </span>
-                  <span className="request-title">{request.name}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            <div className="catalog-actions">
+              <button type="button" className="outline-btn" onClick={() => createRequest({ folderId: selectedFolderId })}>
+                + Request
+              </button>
+              <button type="button" className="outline-btn" onClick={() => createFolderPrompt(selectedFolderId)}>
+                + Folder
+              </button>
+            </div>
+            {selectedFolderId ? (
+              <p className="selected-folder-pill">
+                Folder selected: {selectedFolder?.name ?? "unknown"}
+              </p>
+            ) : (
+              <p className="selected-folder-pill">Folder selected: root</p>
+            )}
+            <ul className="tree-root">{renderCollectionTree(undefined, 0)}</ul>
+          </>
         ) : null}
 
         {activeSection === "History" ? (
@@ -468,17 +709,30 @@ function App() {
         <header className="top-bar">
           <div>
             <h2>{activeRequest ? activeRequest.name : "No request selected"}</h2>
-            <p>Free desktop API client for team workflows</p>
+            <p>RequestPorter · folders, globals and real requests</p>
           </div>
           <div className="top-actions">
-            <button type="button" className="outline-btn" onClick={() => createRequest()}>
-              + New Request
+            <label className="env-select">
+              Environment
+              <select
+                value={data.selectedEnvironmentId ?? ""}
+                onChange={(event) => selectEnvironment(event.currentTarget.value)}
+              >
+                {environments.map((environment) => (
+                  <option key={environment.id} value={environment.id}>
+                    {environment.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" className="outline-btn" onClick={() => setIsGlobalsOpen(true)}>
+              Globals
             </button>
             <button type="button" className="outline-btn" onClick={() => setIsCurlOpen(true)}>
               Import cURL
             </button>
             <span className="pill">{isSaving ? "Saving..." : "Saved"}</span>
-            <span className="pill">Local-first</span>
+            <span className="pill">{selectedEnvironment?.name ?? "no env"}</span>
           </div>
         </header>
 
@@ -700,7 +954,7 @@ function App() {
                             value: event.currentTarget.value,
                           })
                         }
-                        placeholder="paste bearer token"
+                        placeholder="{{authToken}}"
                       />
                     </label>
                   ) : null}
@@ -734,7 +988,7 @@ function App() {
                               in: normalizeAuth(activeRequest.auth).in ?? "header",
                             })
                           }
-                          placeholder="api key value"
+                          placeholder="{{apiKey}}"
                         />
                       </label>
                       <label>
@@ -843,13 +1097,13 @@ function App() {
             <header>
               <h3>Import cURL</h3>
               <button type="button" onClick={() => setIsCurlOpen(false)}>
-                ✕
+                x
               </button>
             </header>
             <textarea
               value={curlValue}
               onChange={(event) => setCurlValue(event.currentTarget.value)}
-              placeholder='curl -X GET "https://jsonplaceholder.typicode.com/todos/1"'
+              placeholder='curl -X GET "{{baseUrl}}/todos/1"'
             />
             {curlError ? <p className="request-error">{curlError}</p> : null}
             <footer>
@@ -858,6 +1112,174 @@ function App() {
               </button>
               <button type="button" className="send-button" onClick={importCurl}>
                 Import
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+
+      {isGlobalsOpen ? (
+        <div className="curl-modal-backdrop">
+          <div className="curl-modal globals-modal">
+            <header>
+              <h3>Global Variables & Headers</h3>
+              <button type="button" onClick={() => setIsGlobalsOpen(false)}>
+                x
+              </button>
+            </header>
+
+            <div className="globals-grid">
+              <section className="table-editor">
+                <h4>Global Variables</h4>
+                <div className="table-head">
+                  <span>On</span>
+                  <span>Variable</span>
+                  <span>Value</span>
+                  <span />
+                </div>
+                {globalVariablesDraft.map((item, index) => (
+                  <div key={item.id} className="table-row">
+                    <input
+                      type="checkbox"
+                      checked={item.enabled}
+                      onChange={(event) =>
+                        updateDraftRow(
+                          globalVariablesDraft,
+                          (next) => setGlobalVariablesDraft(next as EnvironmentVariable[]),
+                          index,
+                          "enabled",
+                          event.currentTarget.checked,
+                        )
+                      }
+                    />
+                    <input
+                      value={item.key}
+                      onChange={(event) =>
+                        updateDraftRow(
+                          globalVariablesDraft,
+                          (next) => setGlobalVariablesDraft(next as EnvironmentVariable[]),
+                          index,
+                          "key",
+                          event.currentTarget.value,
+                        )
+                      }
+                      placeholder="baseUrl"
+                    />
+                    <input
+                      value={item.value}
+                      onChange={(event) =>
+                        updateDraftRow(
+                          globalVariablesDraft,
+                          (next) => setGlobalVariablesDraft(next as EnvironmentVariable[]),
+                          index,
+                          "value",
+                          event.currentTarget.value,
+                        )
+                      }
+                      placeholder="https://api.example.com"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        removeDraftRow(
+                          globalVariablesDraft,
+                          (next) => setGlobalVariablesDraft(next as EnvironmentVariable[]),
+                          index,
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="small-action"
+                  onClick={() => setGlobalVariablesDraft([...globalVariablesDraft, { ...newKeyValue("var") }])}
+                >
+                  + Add Variable
+                </button>
+              </section>
+
+              <section className="table-editor">
+                <h4>Global Headers</h4>
+                <div className="table-head">
+                  <span>On</span>
+                  <span>Header</span>
+                  <span>Value</span>
+                  <span />
+                </div>
+                {globalHeadersDraft.map((item, index) => (
+                  <div key={item.id} className="table-row">
+                    <input
+                      type="checkbox"
+                      checked={item.enabled}
+                      onChange={(event) =>
+                        updateDraftRow(
+                          globalHeadersDraft,
+                          (next) => setGlobalHeadersDraft(next as KeyValue[]),
+                          index,
+                          "enabled",
+                          event.currentTarget.checked,
+                        )
+                      }
+                    />
+                    <input
+                      value={item.key}
+                      onChange={(event) =>
+                        updateDraftRow(
+                          globalHeadersDraft,
+                          (next) => setGlobalHeadersDraft(next as KeyValue[]),
+                          index,
+                          "key",
+                          event.currentTarget.value,
+                        )
+                      }
+                      placeholder="X-Request-Source"
+                    />
+                    <input
+                      value={item.value}
+                      onChange={(event) =>
+                        updateDraftRow(
+                          globalHeadersDraft,
+                          (next) => setGlobalHeadersDraft(next as KeyValue[]),
+                          index,
+                          "value",
+                          event.currentTarget.value,
+                        )
+                      }
+                      placeholder="RequestPorter"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        removeDraftRow(
+                          globalHeadersDraft,
+                          (next) => setGlobalHeadersDraft(next as KeyValue[]),
+                          index,
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="small-action"
+                  onClick={() => setGlobalHeadersDraft([...globalHeadersDraft, newKeyValue("header")])}
+                >
+                  + Add Header
+                </button>
+              </section>
+            </div>
+
+            <footer>
+              <button type="button" className="outline-btn" onClick={() => setIsGlobalsOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="send-button" onClick={saveGlobals}>
+                Save Globals
               </button>
             </footer>
           </div>
