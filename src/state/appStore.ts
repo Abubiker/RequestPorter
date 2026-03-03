@@ -94,6 +94,10 @@ interface AppStoreState {
 const repository = new LocalSnapshotRepository();
 
 function buildRequestName(method: HttpMethod, url: string): string {
+  if (!url.trim()) {
+    return "New Request";
+  }
+
   const normalized = url.replace(/^https?:\/\/[^/]+/, "");
   const path = normalized || "/";
   return `${method} ${path}`;
@@ -563,7 +567,7 @@ export const useAppStore = create<AppStoreState>((set) => {
       updateSnapshot((snapshot) => {
         const now = new Date().toISOString();
         const method = payload?.method ?? "GET";
-        const url = payload?.url ?? "{{baseUrl}}/todos/1";
+        const url = payload?.url ?? "";
         const requestId = generateId("req");
 
         const newRequest: ApiRequest = {

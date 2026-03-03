@@ -322,7 +322,7 @@ header {
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .tree-root {
@@ -340,7 +340,7 @@ header {
 
 .tree-node {
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .folder-row {
@@ -460,6 +460,7 @@ header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
+  min-height: 36px;
 }
 
 .tree-request-item:hover {
@@ -476,10 +477,13 @@ header {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: 34px;
   min-width: 0;
   width: 100%;
   text-align: left;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: 6px;
 }
 
 .tree-request-main:active {
@@ -498,6 +502,17 @@ header {
   height: 16px;
   accent-color: var(--accent);
   margin: 0;
+}
+
+.request-menu {
+  position: relative;
+}
+
+.request-dropdown {
+  width: 170px;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 46;
 }
 
 .tree-request-title {

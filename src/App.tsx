@@ -288,6 +288,7 @@ function App() {
   const [bulkMoveFolderDraft, setBulkMoveFolderDraft] = useState("__root");
   const collectionMenuRef = useRef<HTMLDivElement | null>(null);
   const [folderMenuId, setFolderMenuId] = useState<string | null>(null);
+  const [requestMenuId, setRequestMenuId] = useState<string | null>(null);
 
   useEffect(() => {
     void useAppStore.getState().load();
@@ -326,6 +327,7 @@ function App() {
     setSelectedRequestIds([]);
     setIsCollectionMenuOpen(false);
     setFolderMenuId(null);
+    setRequestMenuId(null);
   }, [data.selectedCollectionId]);
 
   useEffect(() => {
@@ -374,6 +376,9 @@ function App() {
       const targetElement = event.target as Element | null;
       if (!targetElement?.closest(".folder-menu")) {
         setFolderMenuId(null);
+      }
+      if (!targetElement?.closest(".request-menu")) {
+        setRequestMenuId(null);
       }
     };
 
@@ -1160,38 +1165,66 @@ function App() {
                 }
                 title="Select for bulk actions"
               />
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => cloneRequest(request.id)}
-                title="Duplicate request"
-              >
-                D
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => copyRequest(request.id)}
-                title="Copy request JSON"
-              >
-                C
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => openMoveRequestDialog(request.id)}
-                title="Move request"
-              >
-                M
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm danger"
-                onClick={() => removeRequest(request.id)}
-                title="Delete request"
-              >
-                X
-              </button>
+              <div className="request-menu">
+                <button
+                  type="button"
+                  className="icon-btn-sm menu-trigger-sm"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setRequestMenuId((current) =>
+                      current === request.id ? null : request.id,
+                    );
+                  }}
+                  title="Request actions"
+                >
+                  ...
+                </button>
+
+                {requestMenuId === request.id ? (
+                  <div className="dropdown-menu request-dropdown">
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        cloneRequest(request.id);
+                        setRequestMenuId(null);
+                      }}
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        copyRequest(request.id);
+                        setRequestMenuId(null);
+                      }}
+                    >
+                      Copy JSON
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        openMoveRequestDialog(request.id);
+                        setRequestMenuId(null);
+                      }}
+                    >
+                      Move
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item danger"
+                      onClick={() => {
+                        removeRequest(request.id);
+                        setRequestMenuId(null);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </li>,
