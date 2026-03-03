@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type MouseEvent,
@@ -18,6 +19,7 @@ import type {
   SidebarSection,
 } from "./domain/models";
 import {
+  getActiveCollection,
   getActiveRequest,
   getCollectionsForActiveWorkspace,
   getEnvironmentsForActiveWorkspace,
@@ -232,6 +234,9 @@ function App() {
   const selectEnvironment = useAppStore((state) => state.selectEnvironment);
   const selectRequest = useAppStore((state) => state.selectRequest);
   const closeRequestTab = useAppStore((state) => state.closeRequestTab);
+  const renameCollection = useAppStore((state) => state.renameCollection);
+  const duplicateCollection = useAppStore((state) => state.duplicateCollection);
+  const deleteCollection = useAppStore((state) => state.deleteCollection);
   const createRequest = useAppStore((state) => state.createRequest);
   const createCollectionFolder = useAppStore((state) => state.createCollectionFolder);
   const renameCollectionFolder = useAppStore((state) => state.renameCollectionFolder);
@@ -240,8 +245,11 @@ function App() {
   const toggleCollectionFolder = useAppStore((state) => state.toggleCollectionFolder);
   const moveCollectionFolder = useAppStore((state) => state.moveCollectionFolder);
   const moveRequestToFolder = useAppStore((state) => state.moveRequestToFolder);
+  const moveRequestsToFolder = useAppStore((state) => state.moveRequestsToFolder);
   const deleteRequest = useAppStore((state) => state.deleteRequest);
+  const deleteRequests = useAppStore((state) => state.deleteRequests);
   const duplicateRequest = useAppStore((state) => state.duplicateRequest);
+  const duplicateRequests = useAppStore((state) => state.duplicateRequests);
   const updateSelectedRequest = useAppStore((state) => state.updateSelectedRequest);
   const updateWorkspaceGlobals = useAppStore((state) => state.updateWorkspaceGlobals);
   const recordHistory = useAppStore((state) => state.recordHistory);
@@ -266,12 +274,20 @@ function App() {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [dragItem, setDragItem] = useState<DragItem | null>(null);
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
+  const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([]);
+  const [isCollectionMenuOpen, setIsCollectionMenuOpen] = useState(false);
+  const [isCollectionRenameOpen, setIsCollectionRenameOpen] = useState(false);
+  const [collectionNameDraft, setCollectionNameDraft] = useState("");
+  const [isBulkMoveOpen, setIsBulkMoveOpen] = useState(false);
+  const [bulkMoveFolderDraft, setBulkMoveFolderDraft] = useState("__root");
+  const collectionMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     void useAppStore.getState().load();
   }, []);
 
   const collections = getCollectionsForActiveWorkspace(data);
+  const activeCollection = getActiveCollection(data);
   const folders = getFoldersForActiveCollection(data);
   const requests = getRequestsForActiveCollection(data);
   const openRequests = getOpenRequests(data);
@@ -286,6 +302,9 @@ function App() {
   );
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId);
   const movingRequest = requests.find((request) => request.id === movingRequestId);
+  const selectedRequests = requests.filter((request) =>
+    selectedRequestIds.includes(request.id),
+  );
   const history = data.history
     .filter((entry) => entry.workspaceId === data.selectedWorkspaceId)
     .slice(0, 24);
@@ -297,6 +316,8 @@ function App() {
 
   useEffect(() => {
     setSelectedFolderId(undefined);
+    setSelectedRequestIds([]);
+    setIsCollectionMenuOpen(false);
   }, [data.selectedCollectionId]);
 
   useEffect(() => {
@@ -340,6 +361,28 @@ function App() {
       globalThis.window.clearTimeout(timer);
     };
   }, [actionMessage]);
+
+  useEffect(() => {
+    setSelectedRequestIds((previous) =>
+      previous.filter((id) => requests.some((request) => request.id === id)),
+    );
+  }, [requests]);
+
+  useEffect(() => {
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (
+        collectionMenuRef.current &&
+        !collectionMenuRef.current.contains(event.target as Node)
+      ) {
+        setIsCollectionMenuOpen(false);
+      }
+    };
+
+    globalThis.window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      globalThis.window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, []);
 
   const responsePretty = useMemo(
     () => (runtimeResponse ? formatJson(runtimeResponse.body) : ""),
@@ -545,6 +588,7 @@ function App() {
 
   const removeRequest = (requestId: string) => {
     deleteRequest(requestId);
+    setSelectedRequestIds((previous) => previous.filter((id) => id !== requestId));
     setActionMessage("Request deleted");
   };
 
@@ -578,6 +622,144 @@ function App() {
     } catch {
       setActionMessage("Clipboard not available");
     }
+  };
+
+  const toggleRequestSelection = (requestId: string, checked: boolean) => {
+    setSelectedRequestIds((previous) => {
+      if (checked) {
+        if (previous.includes(requestId)) {
+          return previous;
+        }
+        return [...previous, requestId];
+      }
+
+      return previous.filter((id) => id !== requestId);
+    });
+  };
+
+  const selectAllRequests = () => {
+    setSelectedRequestIds(requests.map((request) => request.id));
+    setIsCollectionMenuOpen(false);
+    setActionMessage("All requests selected");
+  };
+
+  const clearSelectedRequests = () => {
+    setSelectedRequestIds([]);
+    setIsCollectionMenuOpen(false);
+    setActionMessage("Selection cleared");
+  };
+
+  const openCollectionRenameDialog = () => {
+    if (!activeCollection) {
+      return;
+    }
+
+    setCollectionNameDraft(activeCollection.name);
+    setIsCollectionRenameOpen(true);
+    setIsCollectionMenuOpen(false);
+  };
+
+  const submitCollectionRename = () => {
+    if (!activeCollection) {
+      return;
+    }
+
+    const nextName = collectionNameDraft.trim();
+    if (!nextName) {
+      setActionMessage("Collection name is required");
+      return;
+    }
+
+    renameCollection(activeCollection.id, nextName);
+    setIsCollectionRenameOpen(false);
+    setActionMessage("Collection renamed");
+  };
+
+  const duplicateActiveCollection = () => {
+    if (!activeCollection) {
+      return;
+    }
+
+    duplicateCollection(activeCollection.id);
+    setSelectedRequestIds([]);
+    setIsCollectionMenuOpen(false);
+    setActionMessage("Collection duplicated");
+  };
+
+  const removeActiveCollection = () => {
+    if (!activeCollection) {
+      return;
+    }
+
+    if (collections.length <= 1) {
+      setActionMessage("Cannot delete the last collection");
+      setIsCollectionMenuOpen(false);
+      return;
+    }
+
+    deleteCollection(activeCollection.id);
+    setSelectedRequestIds([]);
+    setIsCollectionMenuOpen(false);
+    setActionMessage("Collection deleted");
+  };
+
+  const moveSelectedRequestsToRoot = () => {
+    if (!selectedRequestIds.length) {
+      return;
+    }
+
+    moveRequestsToFolder(selectedRequestIds, undefined);
+    setIsCollectionMenuOpen(false);
+    setActionMessage("Selected requests moved to root");
+  };
+
+  const openBulkMoveSelected = () => {
+    if (!selectedRequestIds.length) {
+      return;
+    }
+
+    setBulkMoveFolderDraft("__root");
+    setIsBulkMoveOpen(true);
+    setIsCollectionMenuOpen(false);
+  };
+
+  const submitBulkMove = () => {
+    if (!selectedRequestIds.length) {
+      setIsBulkMoveOpen(false);
+      return;
+    }
+
+    moveRequestsToFolder(
+      selectedRequestIds,
+      bulkMoveFolderDraft === "__root" ? undefined : bulkMoveFolderDraft,
+    );
+    setIsBulkMoveOpen(false);
+    setActionMessage(
+      bulkMoveFolderDraft === "__root"
+        ? "Selected requests moved to root"
+        : "Selected requests moved",
+    );
+  };
+
+  const duplicateSelected = () => {
+    if (!selectedRequestIds.length) {
+      return;
+    }
+
+    duplicateRequests(selectedRequestIds);
+    setIsCollectionMenuOpen(false);
+    setActionMessage("Selected requests duplicated");
+  };
+
+  const deleteSelected = () => {
+    if (!selectedRequestIds.length) {
+      return;
+    }
+
+    deleteRequests(selectedRequestIds);
+    setSelectedRequestIds([]);
+    setIsCollectionMenuOpen(false);
+    setActionMessage("Selected requests deleted");
   };
 
   const getFolderDescendantIds = (rootFolderId: string): Set<string> => {
@@ -938,6 +1120,15 @@ function App() {
               <span className="tree-request-title">{request.name}</span>
             </button>
             <div className="tree-request-actions">
+              <input
+                type="checkbox"
+                className="request-select"
+                checked={selectedRequestIds.includes(request.id)}
+                onChange={(event) =>
+                  toggleRequestSelection(request.id, event.currentTarget.checked)
+                }
+                title="Select for bulk actions"
+              />
               <button
                 type="button"
                 className="icon-btn-sm"
@@ -1023,17 +1214,101 @@ function App() {
 
           <label>
             Collection
-            <select
-              aria-label="Collection selector"
-              value={data.selectedCollectionId}
-              onChange={(event) => selectCollection(event.currentTarget.value)}
-            >
-              {collections.map((collection) => (
-                <option key={collection.id} value={collection.id}>
-                  {collection.name}
-                </option>
-              ))}
-            </select>
+            <div className="collection-select-row" ref={collectionMenuRef}>
+              <select
+                aria-label="Collection selector"
+                value={data.selectedCollectionId}
+                onChange={(event) => selectCollection(event.currentTarget.value)}
+              >
+                {collections.map((collection) => (
+                  <option key={collection.id} value={collection.id}>
+                    {collection.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="menu-trigger"
+                onClick={() => setIsCollectionMenuOpen((value) => !value)}
+                title="Collection actions"
+              >
+                ...
+              </button>
+
+              {isCollectionMenuOpen ? (
+                <div className="dropdown-menu">
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={openCollectionRenameDialog}
+                  >
+                    Rename collection
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={duplicateActiveCollection}
+                    disabled={!activeCollection}
+                  >
+                    Duplicate collection
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item danger"
+                    onClick={removeActiveCollection}
+                    disabled={!activeCollection}
+                  >
+                    Delete collection
+                  </button>
+
+                  <div className="dropdown-divider" />
+
+                  <button type="button" className="dropdown-item" onClick={selectAllRequests}>
+                    Select all requests
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={clearSelectedRequests}
+                    disabled={!selectedRequestIds.length}
+                  >
+                    Clear selected ({selectedRequestIds.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={openBulkMoveSelected}
+                    disabled={!selectedRequestIds.length}
+                  >
+                    Move selected to folder
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={moveSelectedRequestsToRoot}
+                    disabled={!selectedRequestIds.length}
+                  >
+                    Move selected to root
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={duplicateSelected}
+                    disabled={!selectedRequestIds.length}
+                  >
+                    Duplicate selected
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item danger"
+                    onClick={deleteSelected}
+                    disabled={!selectedRequestIds.length}
+                  >
+                    Delete selected
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </label>
         </div>
 
@@ -1074,6 +1349,11 @@ function App() {
             ) : (
               <p className="selected-folder-pill">Folder selected: root</p>
             )}
+            {selectedRequestIds.length ? (
+              <p className="selected-folder-pill">
+                Selected requests: {selectedRequestIds.length}
+              </p>
+            ) : null}
             {actionMessage ? <p className="selected-folder-pill">{actionMessage}</p> : null}
             <ul
               className={dragOverTarget === "__root" ? "tree-root drop-target" : "tree-root"}
@@ -1510,6 +1790,79 @@ function App() {
           </section>
         )}
       </section>
+
+      {isCollectionRenameOpen ? (
+        <div className="curl-modal-backdrop">
+          <div className="curl-modal compact-modal">
+            <header>
+              <h3>Rename Collection</h3>
+              <button type="button" onClick={() => setIsCollectionRenameOpen(false)}>
+                x
+              </button>
+            </header>
+            <label className="dialog-field">
+              Collection name
+              <input
+                value={collectionNameDraft}
+                onChange={(event) => setCollectionNameDraft(event.currentTarget.value)}
+                placeholder="Collection name"
+              />
+            </label>
+            <footer>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => setIsCollectionRenameOpen(false)}
+              >
+                Cancel
+              </button>
+              <button type="button" className="send-button" onClick={submitCollectionRename}>
+                Save
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+
+      {isBulkMoveOpen ? (
+        <div className="curl-modal-backdrop">
+          <div className="curl-modal compact-modal">
+            <header>
+              <h3>Move Selected Requests</h3>
+              <button type="button" onClick={() => setIsBulkMoveOpen(false)}>
+                x
+              </button>
+            </header>
+            <p className="hint">Selected: {selectedRequests.length}</p>
+            <label className="dialog-field">
+              Destination
+              <select
+                value={bulkMoveFolderDraft}
+                onChange={(event) => setBulkMoveFolderDraft(event.currentTarget.value)}
+              >
+                <option value="__root">Root</option>
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <footer>
+              <button
+                type="button"
+                className="outline-btn"
+                onClick={() => setIsBulkMoveOpen(false)}
+              >
+                Cancel
+              </button>
+              <button type="button" className="send-button" onClick={submitBulkMove}>
+                Move
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
 
       {folderDialog ? (
         <div className="curl-modal-backdrop">
