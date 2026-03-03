@@ -351,6 +351,24 @@ body {
   display: inline-flex;
   gap: 4px;
   padding-right: 4px;
+  position: relative;
+}
+
+.folder-menu {
+  position: relative;
+}
+
+.menu-trigger-sm {
+  width: 30px;
+  font-size: 16px;
+  letter-spacing: 1px;
+}
+
+.folder-dropdown {
+  width: 190px;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 45;
 }
 
 .icon-btn-sm {

@@ -281,6 +281,7 @@ function App() {
   const [isBulkMoveOpen, setIsBulkMoveOpen] = useState(false);
   const [bulkMoveFolderDraft, setBulkMoveFolderDraft] = useState("__root");
   const collectionMenuRef = useRef<HTMLDivElement | null>(null);
+  const [folderMenuId, setFolderMenuId] = useState<string | null>(null);
 
   useEffect(() => {
     void useAppStore.getState().load();
@@ -318,6 +319,7 @@ function App() {
     setSelectedFolderId(undefined);
     setSelectedRequestIds([]);
     setIsCollectionMenuOpen(false);
+    setFolderMenuId(null);
   }, [data.selectedCollectionId]);
 
   useEffect(() => {
@@ -355,11 +357,17 @@ function App() {
 
   useEffect(() => {
     const onPointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target as Node;
       if (
         collectionMenuRef.current &&
-        !collectionMenuRef.current.contains(event.target as Node)
+        !collectionMenuRef.current.contains(target)
       ) {
         setIsCollectionMenuOpen(false);
+      }
+
+      const targetElement = event.target as Element | null;
+      if (!targetElement?.closest(".folder-menu")) {
+        setFolderMenuId(null);
       }
     };
 
@@ -1035,46 +1043,76 @@ function App() {
               {folder.name}
             </button>
             <div className="folder-actions">
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => createRequest({ folderId: folder.id })}
-                title="Add request"
-              >
-                +
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => openCreateFolderDialog(folder.id)}
-                title="Add subfolder"
-              >
-                F+
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => openRenameFolderDialog(folder)}
-                title="Rename folder"
-              >
-                R
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm"
-                onClick={() => cloneFolder(folder)}
-                title="Duplicate folder"
-              >
-                D
-              </button>
-              <button
-                type="button"
-                className="icon-btn-sm danger"
-                onClick={() => removeFolder(folder)}
-                title="Delete folder"
-              >
-                X
-              </button>
+              <div className="folder-menu">
+                <button
+                  type="button"
+                  className="icon-btn-sm menu-trigger-sm"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setFolderMenuId((current) =>
+                      current === folder.id ? null : folder.id,
+                    );
+                  }}
+                  title="Folder actions"
+                >
+                  ...
+                </button>
+
+                {folderMenuId === folder.id ? (
+                  <div className="dropdown-menu folder-dropdown">
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        createRequest({ folderId: folder.id });
+                        setFolderMenuId(null);
+                      }}
+                    >
+                      Add request
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        openCreateFolderDialog(folder.id);
+                        setFolderMenuId(null);
+                      }}
+                    >
+                      Add subfolder
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        openRenameFolderDialog(folder);
+                        setFolderMenuId(null);
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        cloneFolder(folder);
+                        setFolderMenuId(null);
+                      }}
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item danger"
+                      onClick={() => {
+                        removeFolder(folder);
+                        setFolderMenuId(null);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
           {expanded ? <ul className="tree-children">{renderCollectionTree(folder.id, depth + 1)}</ul> : null}
