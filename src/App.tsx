@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -51,6 +52,30 @@ interface RuntimeResponse {
   ok: boolean;
 }
 
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+interface JsonViewerLine {
+  id: string;
+  depth: number;
+  content: ReactElement;
+}
+
+interface BuildJsonLinesParams {
+  value: JsonValue;
+  path: string;
+  depth: number;
+  isLast: boolean;
+  keyName?: string;
+  collapsedPaths: Set<string>;
+  onToggle: (path: string) => void;
+}
+
 type EditableRow = {
   id: string;
   key: string;
@@ -92,6 +117,280 @@ function formatJson(value: string): string {
   } catch {
     return value;
   }
+}
+
+function getHeaderValue(headers: RuntimeHeader[], name: string): string | undefined {
+  const normalized = name.toLowerCase();
+  const match = headers.find((item) => item.key.toLowerCase() === normalized);
+  return match?.value;
+}
+
+function isLikelyJson(contentType: string, body: string): boolean {
+  if (contentType.includes("application/json") || contentType.includes("+json")) {
+    return true;
+  }
+
+  const trimmed = body.trim();
+  return (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  );
+}
+
+function isLikelyMarkup(contentType: string, body: string): boolean {
+  if (
+    contentType.includes("text/html") ||
+    contentType.includes("application/xml") ||
+    contentType.includes("text/xml") ||
+    contentType.includes("application/xhtml+xml")
+  ) {
+    return true;
+  }
+
+  const trimmed = body.trim();
+  return trimmed.startsWith("<") && trimmed.endsWith(">");
+}
+
+function isSelfClosingTag(token: string): boolean {
+  const raw = token.toLowerCase();
+  return (
+    raw.endsWith("/>") ||
+    raw.startsWith("<!doctype") ||
+    raw.startsWith("<?") ||
+    raw.startsWith("<!") ||
+    raw.startsWith("<br") ||
+    raw.startsWith("<hr") ||
+    raw.startsWith("<img") ||
+    raw.startsWith("<meta") ||
+    raw.startsWith("<link") ||
+    raw.startsWith("<input")
+  );
+}
+
+function formatMarkup(value: string): string {
+  const collapsed = value.replace(/>\s+</g, "><").trim();
+  if (!collapsed) {
+    return value;
+  }
+
+  const tokens = collapsed
+    .replace(/</g, "\n<")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const lines: string[] = [];
+  let level = 0;
+
+  tokens.forEach((token) => {
+    const isClosingTag = /^<\/[^>]+>$/i.test(token);
+    const hasInlineClose = /^<[^/!][^>]*>.*<\/[^>]+>$/i.test(token);
+    const isOpeningTag = /^<[^/!][^>]*>$/i.test(token) && !isSelfClosingTag(token);
+
+    if (isClosingTag) {
+      level = Math.max(level - 1, 0);
+    }
+
+    lines.push(`${"  ".repeat(level)}${token}`);
+
+    if (!hasInlineClose && isOpeningTag) {
+      level += 1;
+    }
+  });
+
+  return lines.join("\n");
+}
+
+function formatPrettyBody(response: RuntimeResponse): string {
+  const body = response.body ?? "";
+  const contentType = (getHeaderValue(response.headers, "content-type") ?? "").toLowerCase();
+
+  if (isLikelyJson(contentType, body)) {
+    return formatJson(body);
+  }
+
+  if (isLikelyMarkup(contentType, body)) {
+    return formatMarkup(body);
+  }
+
+  return body;
+}
+
+function isJsonRecord(value: JsonValue): value is { [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatJsonItemsLabel(
+  value: JsonValue[] | { [key: string]: JsonValue },
+): string {
+  const count = Array.isArray(value) ? value.length : Object.keys(value).length;
+  return `${count} item${count === 1 ? "" : "s"}`;
+}
+
+function tryParseResponseJson(response: RuntimeResponse): JsonValue | undefined {
+  const body = response.body ?? "";
+  const contentType = (getHeaderValue(response.headers, "content-type") ?? "").toLowerCase();
+
+  if (!isLikelyJson(contentType, body)) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(body) as JsonValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function renderJsonPrimitive(value: JsonValue): ReactElement {
+  if (typeof value === "string") {
+    return <span className="json-string">{JSON.stringify(value)}</span>;
+  }
+  if (typeof value === "number") {
+    return <span className="json-number">{value}</span>;
+  }
+  if (typeof value === "boolean") {
+    return <span className="json-boolean">{value ? "true" : "false"}</span>;
+  }
+
+  return <span className="json-null">null</span>;
+}
+
+function buildJsonViewerLines({
+  value,
+  path,
+  depth,
+  isLast,
+  keyName,
+  collapsedPaths,
+  onToggle,
+}: BuildJsonLinesParams): JsonViewerLine[] {
+  const keyFragment = keyName ? (
+    <>
+      <span className="json-key">{JSON.stringify(keyName)}</span>
+      <span className="json-punc">: </span>
+    </>
+  ) : null;
+
+  const commaFragment = !isLast ? <span className="json-punc">,</span> : null;
+
+  if (Array.isArray(value) || isJsonRecord(value)) {
+    const isArray = Array.isArray(value);
+    const openSymbol = isArray ? "[" : "{";
+    const closeSymbol = isArray ? "]" : "}";
+    const entries: Array<[string, JsonValue]> = isArray
+      ? value.map((item, index) => [String(index), item])
+      : Object.entries(value);
+
+    if (entries.length === 0) {
+      return [
+        {
+          id: `${path}:empty`,
+          depth,
+          content: (
+            <span className="json-token-row">
+              <span className="json-toggle-spacer" />
+              {keyFragment}
+              <span className="json-punc">
+                {openSymbol}
+                {closeSymbol}
+              </span>
+              {commaFragment}
+            </span>
+          ),
+        },
+      ];
+    }
+
+    const isCollapsed = collapsedPaths.has(path);
+    const countLabel = formatJsonItemsLabel(value);
+
+    if (isCollapsed) {
+      return [
+        {
+          id: `${path}:collapsed`,
+          depth,
+          content: (
+            <span className="json-token-row">
+              <button type="button" className="json-toggle" onClick={() => onToggle(path)}>
+                ▸
+              </button>
+              {keyFragment}
+              <span className="json-punc">
+                {openSymbol}
+                ...
+                {closeSymbol}
+              </span>
+              <span className="json-muted">{countLabel}</span>
+              {commaFragment}
+            </span>
+          ),
+        },
+      ];
+    }
+
+    const lines: JsonViewerLine[] = [
+      {
+        id: `${path}:open`,
+        depth,
+        content: (
+          <span className="json-token-row">
+            <button type="button" className="json-toggle" onClick={() => onToggle(path)}>
+              ▾
+            </button>
+            {keyFragment}
+            <span className="json-punc">{openSymbol}</span>
+          </span>
+        ),
+      },
+    ];
+
+    entries.forEach(([entryKey, entryValue], index) => {
+      const childPath = isArray
+        ? `${path}[${entryKey}]`
+        : `${path}.${encodeURIComponent(entryKey)}`;
+      lines.push(
+        ...buildJsonViewerLines({
+          value: entryValue,
+          path: childPath,
+          depth: depth + 1,
+          isLast: index === entries.length - 1,
+          keyName: isArray ? undefined : entryKey,
+          collapsedPaths,
+          onToggle,
+        }),
+      );
+    });
+
+    lines.push({
+      id: `${path}:close`,
+      depth,
+      content: (
+        <span className="json-token-row">
+          <span className="json-toggle-spacer" />
+          <span className="json-punc">{closeSymbol}</span>
+          {commaFragment}
+        </span>
+      ),
+    });
+
+    return lines;
+  }
+
+  return [
+    {
+      id: `${path}:value`,
+      depth,
+      content: (
+        <span className="json-token-row">
+          <span className="json-toggle-spacer" />
+          {keyFragment}
+          {renderJsonPrimitive(value)}
+          {commaFragment}
+        </span>
+      ),
+    },
+  ];
 }
 
 function toErrorMessage(error: unknown): string {
@@ -222,11 +521,49 @@ function normalizeAuth(auth?: AuthConfig): AuthConfig {
   return { type: "none" };
 }
 
-const SIDEBAR_SHORT_LABELS: Record<SidebarSection, string> = {
-  Collections: "API",
-  History: "HIS",
-  Environments: "ENV",
-};
+function getSidebarIcon(section: SidebarSection): ReactElement {
+  if (section === "Collections") {
+    return (
+      <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M4.5 6.5h15m-15 5.5h15m-15 5.5h9"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+
+  if (section === "History") {
+    return (
+      <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.8v4.1h4.1M12 8.5v4l2.7 1.6"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  return (
+    <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M5 7.5h14M5 12h14M5 16.5h9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+      <circle cx="17.5" cy="16.5" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
 
 function App() {
   const isLoaded = useAppStore((state) => state.isLoaded);
@@ -264,6 +601,7 @@ function App() {
   const [responseTab, setResponseTab] = useState<ResponseTab>("pretty");
   const [runtimeResponse, setRuntimeResponse] = useState<RuntimeResponse | null>(null);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [collapsedJsonPaths, setCollapsedJsonPaths] = useState<Set<string>>(new Set());
   const [isSending, setIsSending] = useState(false);
   const [isCurlOpen, setIsCurlOpen] = useState(false);
   const [curlValue, setCurlValue] = useState("");
@@ -286,6 +624,8 @@ function App() {
   const [collectionNameDraft, setCollectionNameDraft] = useState("");
   const [isBulkMoveOpen, setIsBulkMoveOpen] = useState(false);
   const [bulkMoveFolderDraft, setBulkMoveFolderDraft] = useState("__root");
+  const [collectionSearch, setCollectionSearch] = useState("");
+  const [historyFocusRequestId, setHistoryFocusRequestId] = useState<string | null>(null);
   const collectionMenuRef = useRef<HTMLDivElement | null>(null);
   const [folderMenuId, setFolderMenuId] = useState<string | null>(null);
   const [requestMenuId, setRequestMenuId] = useState<string | null>(null);
@@ -313,9 +653,135 @@ function App() {
   const selectedRequests = requests.filter((request) =>
     selectedRequestIds.includes(request.id),
   );
-  const history = data.history
-    .filter((entry) => entry.workspaceId === data.selectedWorkspaceId)
-    .slice(0, 24);
+  const requestsById = useMemo(
+    () => new Map(data.requests.map((request) => [request.id, request] as const)),
+    [data.requests],
+  );
+  const workspaceHistory = useMemo(
+    () => data.history.filter((entry) => entry.workspaceId === data.selectedWorkspaceId),
+    [data.history, data.selectedWorkspaceId],
+  );
+  const history = useMemo(() => {
+    const scoped = historyFocusRequestId
+      ? workspaceHistory.filter((entry) => entry.requestId === historyFocusRequestId)
+      : workspaceHistory;
+
+    return scoped.slice(0, 180);
+  }, [workspaceHistory, historyFocusRequestId]);
+  const historyFocusedRequest = historyFocusRequestId
+    ? requestsById.get(historyFocusRequestId)
+    : undefined;
+  const collectionSearchTerm = collectionSearch.trim().toLowerCase();
+  const hasCollectionSearch = collectionSearchTerm.length > 0;
+
+  const childFoldersByParent = useMemo(() => {
+    const map = new Map<string, CollectionFolder[]>();
+    folders.forEach((folder) => {
+      const key = folder.parentFolderId ?? "__root";
+      const list = map.get(key);
+      if (list) {
+        list.push(folder);
+      } else {
+        map.set(key, [folder]);
+      }
+    });
+    return map;
+  }, [folders]);
+
+  const requestsByFolder = useMemo(() => {
+    const map = new Map<string, typeof requests>();
+    requests.forEach((request) => {
+      const key = request.folderId ?? "__root";
+      const list = map.get(key);
+      if (list) {
+        list.push(request);
+      } else {
+        map.set(key, [request]);
+      }
+    });
+    return map;
+  }, [requests]);
+
+  const treeVisibility = useMemo(() => {
+    if (!hasCollectionSearch) {
+      return null;
+    }
+
+    const visibleFolderIds = new Set<string>();
+    const visibleRequestIds = new Set<string>();
+
+    const matchesSearch = (value: string): boolean =>
+      value.toLowerCase().includes(collectionSearchTerm);
+
+    const addFolderWithAncestors = (folderId?: string): void => {
+      let current = folderId;
+
+      while (current) {
+        if (visibleFolderIds.has(current)) {
+          break;
+        }
+
+        visibleFolderIds.add(current);
+        current = folderById.get(current)?.parentFolderId;
+      }
+    };
+
+    const addFolderDescendants = (folderId: string): void => {
+      const stack = [folderId];
+
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current) {
+          continue;
+        }
+
+        if (!visibleFolderIds.has(current)) {
+          visibleFolderIds.add(current);
+        }
+
+        (requestsByFolder.get(current) ?? []).forEach((request) => {
+          visibleRequestIds.add(request.id);
+        });
+
+        (childFoldersByParent.get(current) ?? []).forEach((child) => {
+          stack.push(child.id);
+        });
+      }
+    };
+
+    requests.forEach((request) => {
+      if (!matchesSearch(request.name) && !matchesSearch(request.url)) {
+        return;
+      }
+
+      visibleRequestIds.add(request.id);
+      addFolderWithAncestors(request.folderId);
+    });
+
+    folders.forEach((folder) => {
+      if (!matchesSearch(folder.name)) {
+        return;
+      }
+
+      addFolderWithAncestors(folder.id);
+      addFolderDescendants(folder.id);
+    });
+
+    return { visibleFolderIds, visibleRequestIds };
+  }, [
+    hasCollectionSearch,
+    collectionSearchTerm,
+    folders,
+    requests,
+    folderById,
+    childFoldersByParent,
+    requestsByFolder,
+  ]);
+
+  const hasTreeResults =
+    !treeVisibility ||
+    treeVisibility.visibleFolderIds.size > 0 ||
+    treeVisibility.visibleRequestIds.size > 0;
 
   useEffect(() => {
     setRuntimeError(null);
@@ -329,6 +795,21 @@ function App() {
     setFolderMenuId(null);
     setRequestMenuId(null);
   }, [data.selectedCollectionId]);
+
+  useEffect(() => {
+    if (!historyFocusRequestId) {
+      return;
+    }
+
+    const exists = workspaceHistory.some((entry) => entry.requestId === historyFocusRequestId);
+    if (!exists) {
+      setHistoryFocusRequestId(null);
+    }
+  }, [historyFocusRequestId, workspaceHistory]);
+
+  useEffect(() => {
+    setCollapsedJsonPaths(new Set());
+  }, [runtimeResponse?.body]);
 
   useEffect(() => {
     if (selectedFolderId && !folderById.has(selectedFolderId)) {
@@ -388,14 +869,46 @@ function App() {
     };
   }, []);
 
+  const toggleJsonPath = useCallback((path: string) => {
+    setCollapsedJsonPaths((previous) => {
+      const next = new Set(previous);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }, []);
+
+  const responseJson = useMemo(
+    () => (runtimeResponse ? tryParseResponseJson(runtimeResponse) : undefined),
+    [runtimeResponse],
+  );
+
+  const jsonPrettyLines = useMemo(() => {
+    if (responseJson === undefined) {
+      return [];
+    }
+
+    return buildJsonViewerLines({
+      value: responseJson,
+      path: "$",
+      depth: 0,
+      isLast: true,
+      collapsedPaths: collapsedJsonPaths,
+      onToggle: toggleJsonPath,
+    });
+  }, [responseJson, collapsedJsonPaths, toggleJsonPath]);
+
   const responsePretty = useMemo(
-    () => (runtimeResponse ? formatJson(runtimeResponse.body) : ""),
+    () => (runtimeResponse ? formatPrettyBody(runtimeResponse) : ""),
     [runtimeResponse],
   );
 
   const activeSectionMeta: Record<SidebarSection, string> = {
     Collections: `${requests.length} requests`,
-    History: `${history.length} records`,
+    History: `${workspaceHistory.length} records`,
     Environments: `${environments.length} env`,
   };
 
@@ -1008,12 +1521,21 @@ function App() {
 
   const renderCollectionTree = (parentFolderId?: string, depth = 0): ReactElement[] => {
     const folderKey = parentFolderId ?? "__root";
-    const childFolders = folders
+    let childFolders = folders
       .filter((folder) => (folder.parentFolderId ?? "__root") === folderKey)
       .sort((a, b) => a.name.localeCompare(b.name));
-    const directRequests = requests.filter(
+    let directRequests = requests.filter(
       (request) => (request.folderId ?? "__root") === folderKey,
     );
+
+    if (treeVisibility) {
+      childFolders = childFolders.filter((folder) =>
+        treeVisibility.visibleFolderIds.has(folder.id),
+      );
+      directRequests = directRequests.filter((request) =>
+        treeVisibility.visibleRequestIds.has(request.id),
+      );
+    }
 
     const nodes: ReactElement[] = [];
 
@@ -1234,6 +1756,20 @@ function App() {
     return nodes;
   };
 
+  const focusRequestHistory = (requestId: string) => {
+    setHistoryFocusRequestId(requestId);
+
+    const request = requestsById.get(requestId);
+    if (!request) {
+      return;
+    }
+
+    if (request.collectionId !== data.selectedCollectionId) {
+      selectCollection(request.collectionId);
+    }
+    selectRequest(request.id);
+  };
+
   return (
     <main className="shell">
       <aside className="nav-rail motion-enter">
@@ -1246,8 +1782,9 @@ function App() {
               className={section === activeSection ? "rail-button active" : "rail-button"}
               onClick={() => setActiveSection(section)}
               title={section}
+              aria-label={section}
             >
-              {SIDEBAR_SHORT_LABELS[section]}
+              {getSidebarIcon(section)}
             </button>
           ))}
         </div>
@@ -1256,8 +1793,8 @@ function App() {
 
       <section className="catalog-pane motion-enter delay-1">
         <header className="catalog-header">
-          <h1>APIs</h1>
-          <p>Workspace collections</p>
+          <h1>Collections</h1>
+          <p>{activeCollection?.name ?? "Workspace collections"}</p>
         </header>
 
         <div className="selectors">
@@ -1406,6 +1943,25 @@ function App() {
                 Root
               </button>
             </div>
+            <div className="collection-search-wrap">
+              <input
+                className="collection-search-input"
+                value={collectionSearch}
+                onChange={(event) => setCollectionSearch(event.currentTarget.value)}
+                placeholder="Search collections"
+                aria-label="Search collections"
+              />
+              {hasCollectionSearch ? (
+                <button
+                  type="button"
+                  className="collection-search-clear"
+                  onClick={() => setCollectionSearch("")}
+                  aria-label="Clear search"
+                >
+                  ×
+                </button>
+              ) : null}
+            </div>
             {selectedFolderId ? (
               <p className="selected-folder-pill">
                 Folder selected: {selectedFolder?.name ?? "unknown"}
@@ -1425,32 +1981,72 @@ function App() {
               onDragLeave={handleDragLeaveTarget(undefined)}
               onDrop={handleDropTarget(undefined)}
             >
-              {renderCollectionTree(undefined, 0)}
+              {hasTreeResults ? (
+                renderCollectionTree(undefined, 0)
+              ) : (
+                <li className="hint">No matches for “{collectionSearch}”.</li>
+              )}
             </ul>
           </>
         ) : null}
 
         {activeSection === "History" ? (
-          <ul className="history-compact">
-            {history.length ? (
-              history.map((entry) => (
-                <li key={entry.id} className="history-compact-item">
-                  <span className={`method-badge ${getMethodColor(entry.method)}`}>
-                    {entry.method}
-                  </span>
-                  <div>
-                    <p>{entry.url}</p>
-                    <small>
-                      {entry.statusCode || "ERR"} · {entry.durationMs} ms ·{" "}
-                      {bytesToReadable(entry.responseSizeBytes)}
-                    </small>
-                  </div>
-                </li>
-              ))
-            ) : (
-              <li className="hint">No history yet. Run your first request.</li>
-            )}
-          </ul>
+          <>
+            {historyFocusedRequest ? (
+              <div className="history-filter-row">
+                <p className="selected-folder-pill">
+                  History: {historyFocusedRequest.name}
+                </p>
+                <button
+                  type="button"
+                  className="outline-btn history-clear-btn"
+                  onClick={() => setHistoryFocusRequestId(null)}
+                >
+                  All history
+                </button>
+              </div>
+            ) : null}
+            <ul className="history-compact">
+              {history.length ? (
+                history.map((entry) => (
+                  <li key={entry.id}>
+                    <button
+                      type="button"
+                      className={
+                        entry.requestId === historyFocusRequestId
+                          ? "history-row active"
+                          : "history-row"
+                      }
+                      onClick={() => focusRequestHistory(entry.requestId)}
+                      title="Show history for this request"
+                    >
+                      <div className="history-row-main">
+                        <span className={`method-badge ${getMethodColor(entry.method)}`}>
+                          {entry.method}
+                        </span>
+                        <p className="history-url">{entry.url}</p>
+                      </div>
+                      <div className="history-meta">
+                        <span
+                          className={
+                            entry.statusCode >= 400 || entry.statusCode === 0
+                              ? "history-status history-status-error"
+                              : "history-status"
+                          }
+                        >
+                          {entry.statusCode || "ERR"}
+                        </span>
+                        <span>{entry.durationMs} ms</span>
+                        <span>{bytesToReadable(entry.responseSizeBytes)}</span>
+                      </div>
+                    </button>
+                  </li>
+                ))
+              ) : (
+                <li className="hint">No history yet. Run your first request.</li>
+              )}
+            </ul>
+          </>
         ) : null}
 
         {activeSection === "Environments" ? (
@@ -1831,7 +2427,23 @@ function App() {
               ) : null}
 
               {runtimeResponse && responseTab === "pretty" ? (
-                <pre className="response-viewer animate-in">{responsePretty}</pre>
+                responseJson !== undefined ? (
+                  <div className="response-viewer json-viewer animate-in">
+                    {jsonPrettyLines.map((line, index) => (
+                      <div key={line.id} className="json-line">
+                        <span className="json-line-number">{index + 1}</span>
+                        <div
+                          className="json-line-content"
+                          style={{ paddingLeft: `${line.depth * 14}px` }}
+                        >
+                          {line.content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <pre className="response-viewer animate-in">{responsePretty}</pre>
+                )
               ) : null}
 
               {runtimeResponse && responseTab === "raw" ? (
